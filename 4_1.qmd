@@ -1,0 +1,328 @@
+---
+title: "応用編 一般化線形混合モデル"
+subtitle: "1章 階層ベイズモデルと一般化線形化モデルの基本"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+# 階層ベイズモデル
+
+**階層ベイズモデル**は，そのまま階層構造をもつモデルである．上位の層の確率変数の値が，下位の層の確率分布の母数である．
+
+階層構造はさまざまなモデルを想定可能．一般化線形混合モデル(GLMM)も，状態空間モデルも，ともに階層ベイズモデルである．
+
+# 分析の準備
+
+まずはデータを読み込む
+```{r}
+#データの読み込み
+fish_1 <- read.csv("data/4-1-1-fish-num-2.csv")
+
+#id列を変数ではなく，factorとして扱う
+fish_1$id <- as.factor(fish_1$id)
+head(fish_1)
+```
+天気や気温に関するデータは記録されているが，それ以外がない．計測されていないものが応答変数に影響を与えることを想定しなければならない
+
+
+# 通常のポアソン回帰分析
+
+計測されていないものが応答変数に影響を与える場合，通常のポアソン回帰ではできないことがある．が，一旦やってみる．
+
+まずはリストを作る
+```{r}
+#リストの前にデザイン行列を作っておく
+mat_1 <- model.matrix(formula(~weather), fish_1)
+mat_1 <- data.frame(mat_1)
+
+#予測のための変数
+X_pred <- c(0:30)
+
+
+#リストの作成
+list_1 <- list(
+  N = nrow(fish_1),
+  Y = fish_1$fish_num,
+  X_1 = mat_1$weathersunny,
+  X_2 = fish_1$temperature,
+  
+  N_pred = length(X_pred),
+  X_pred = X_pred
+)
+```
+
+stanにモデルを記述し，コンパイルする
+```{r}
+model_1 <- cmdstan_model("stan/4_1_1.stan")
+model_1$print()
+```
+コンパイルができたので，MCMCを実行しよう
+```{r}
+#| results: hide
+fit_1 <- model_1$sample(
+  data = list_1,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+結果を表示する
+```{r}
+fit_1$summary()
+```
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(fit_1$summary()[, "rhat"] < 1.1, na.rm = TRUE)
+```
+TRUEが帰ってきたので問題なし
+
+乱数を取り出して，予測区間を図示する．
+
+まずはデータの整形から行う
+```{r}
+#乱数の取り出し
+post_1 <- fit_1$draws() |>
+as_draws_df()
+
+#予測区間の図示で必要な値
+v1 <- rep("cloudy", 31)
+v1 <- data.frame(v1) |> 
+  rename(weather = v1)
+
+v2 <- rep("sunny",31)
+v2 <- data.frame(v2) |> 
+  rename(weather = v2)
+
+weather <- rbind(v1, v2)
+
+#平均
+mean_1 <- data.frame(apply(
+  post_1,
+  2,
+  mean
+))
+
+
+#要らん行を消す
+#4はパラメータとlp
+#100はlmbdの数
+#31はX_predの数
+#1は何番目かでindexがズレるから
+n1 <-  4 + 100 + 31 + 31 + 1
+n2 <- 4 + 100 + 31 + 31  + 31 + 31
+
+pred_mean_1 <- mean_1[n1:n2,]
+
+#予測区間
+pred_1 <- data.frame(t(apply(
+  post_1,
+  2,
+  quantile,
+  probs = c(0.005, 0.5, 0.995)
+)))
+
+pred_1 <- pred_1[n1:n2,] |> 
+  cbind(weather) |> 
+  cbind(X_pred) |> 
+  cbind(pred_mean_1) |> 
+  rename(ymin = X0.5.,
+         ymax = X99.5.,
+         temperature = X_pred,
+         fish_num = X50.)
+```
+
+データの整形が終わったので，図示に入る
+```{r}
+#| fig-cap: "通常のポアソン回帰の予測区間"
+
+#ベースの散布図のプロット
+ggplot(data = fish_1,
+       aes(x = temperature,
+           y = fish_num))+
+  geom_point(aes(colour = weather))+
+  
+#予測区間のプロット
+  geom_line(data = pred_1,
+            aes(x = temperature,
+                y = fish_num,
+                colour = weather))+
+  geom_ribbon(data = pred_1,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  fill = weather),
+              alpha = 0.5)
+```
+99%予測区間よりも外側に，まあまあな数のデータがある．モデルが正しくなかったということであり，改良の余地あり．
+
+# 固定効果・ランダム効果・混合モデル
+
+- 用語の整理
+  - 普通の$\beta_k$のことを**固定効果**という
+  - 一方，$r_i$のように，ランダムに変化する係数を**変量効果**という
+  - 固定効果と変量効果が混在するモデルを**混合モデル**という
+  - 一般化線形モデルを混合モデルにしたやつが**一般化線形混合モデル**
+
+# モデルの構造
+
+調査のたびに，調査した人が変わったり，湖の状況が変わったりする．線形予測子に「調査ごとに変化するランダムな影響」を加える
+
+$$
+\begin{aligned}
+&r_i \sim \text{Nromal}(0, \sigma^2_r)\\
+&\text{log}(\lambda_i) = \beta_0 + \beta_1x_{i1} + \beta_2 x_{i2} + r_i\\
+&y_i \sim \text{Poiss}(\lambda_i)
+\end{aligned}
+$$
+
+# stanファイル
+
+記述して，コンパイルする
+```{r}
+model_2 <- cmdstan_model("stan/4_1_2.stan")
+```
+コンパイルができたので，ファイルを確認しておく
+
+```{r}
+model_2$print()
+```
+rのような，パラメータのパラメータを**超パラメータ**または，**ハイパーパラメータ**と呼ぶ
+
+# MCMCの実行
+
+mcmcを実行する
+
+
+```{r}
+#| results: hide
+fit_2 <- model_2$sample(
+  data = list_1,
+  seed = 1,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+結果の図示
+```{r}
+fit_2$summary()
+```
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(fit_2$summary()[,"rhat"] < 1.1 ,na.rm = TRUE)
+```
+収束に問題はなかったようである．
+
+
+
+一応可視化してみる
+```{r}
+bayesplot::rhat(fit_3) |> 
+  mcmc_rhat()
+```
+
+一応可視化して収束を確認する
+```{r}
+#| fig-cap: "収束の可視化"
+
+combo <- mcmc_combo(fit_2$draws(c("beta_0","beta_1","beta_2")))
+
+
+plot(combo)
+```
+
+```{r}
+#| fig-cap: "信用区間の図示"
+
+#信用区間の確認
+mcmc_areas(fit_2$draws(c("beta_0","beta_1","beta_2")))
+```
+
+
+
+
+
+
+# test
+
+
+
+
+
+
+
+
+
+
+
+
+
+

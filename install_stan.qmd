@@ -1,0 +1,35 @@
+---
+title: "Untitled"
+format: html
+---
+
+
+```{r}
+dotR <- file.path(Sys.getenv("HOME"), ".R")
+if (!file.exists(dotR)) dir.create(dotR)
+M <- file.path(dotR, "Makevars")
+if (!file.exists(M)) file.create(M)
+arch <- ifelse(R.version$arch == "aarch64", "arm64", "x86_64")
+cat(paste("\nCXX17FLAGS += -O3 -mtune=native -arch", arch, "-ftemplate-depth-256"),
+    file = M, sep = "\n", append = FALSE)
+```
+
+```{r}
+remove.packages("rstan")
+if (file.exists(".RData")) file.remove(".RData")
+```
+
+```{r}
+install.packages("rstan", repos = "https://cloud.r-project.org/", dependencies = TRUE)
+```
+
+```{r}
+example(stan_model, package = "rstan", run.dontrun = TRUE)
+```
+
+
+
+```{r}
+pkgbuild::has_build_tools(debug = TRUE)
+```
+

@@ -1,0 +1,290 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "3章 状態空間モデルもよる予測と補完"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes)
+source("func/plotSSM.R")
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+# データの読み込み
+
+5_2と同じやつを使う
+
+```{r}
+sales_df_all <- read.csv("data/5-2-1-sales-ts-1.csv")
+sales_df_all$date <- as.POSIXct(sales_df_all$date)
+```
+
+
+# 予測のためのstanファイルの実装
+
+コンパイルしてみる
+```{r}
+model_1 <- cmdstan_model("stan/5_3_1.stan")
+
+model_1$print()
+```
+
+# ローカルレベルモデルによる予測の実行
+
+まずはデータのリストを用意する
+```{r}
+#データの準備
+data_list_pred <- list(
+  T = nrow(sales_df_all),
+  y = sales_df_all$sales,
+  pred_term = 20
+)
+
+#モデルの推定
+local_level_pred <- model_1$sample(
+  data = data_list_pred,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+
+予測対象区間も含めたPOSIXct型のベクトルを用意する．つまり，合計で120日分
+```{r}
+date_pred <- seq(
+  from = as.POSIXct("2010-01-01"),
+  by = "days",
+  len = 120
+)
+```
+
+
+```{r}
+local_level_pred$summary(c("s_w","s_v"))
+```
+
+過程誤差よりも観測誤差の方が大きいようである．
+
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(local_level_pred$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+
+収束に問題はなかったようである．念のために可視化しておく
+```{r}
+combo <- mcmc_combo(local_level_pred$draws(c("s_w","s_v")))
+area <- mcmc_areas(local_level_pred$draws(c("s_w","s_v")) )
+plot(combo)
+plot(area)
+```
+
+あとは乱数を抽出して，結果を図示する
+```{r}
+#生成された乱数を格納
+drws <- local_level_pred$draws("mu_pred")
+
+#推定結果の図示
+plotSSM(sample = drws,
+        time_vec = date_pred,
+        graph_title = "予測の結果",
+        y_label = "sales")
+```
+
+予測値はデータが得られた最後の時点からほとんど変化してない．
+
+ローカルレベルモデルの状態方程式を再掲する
+$$
+\mu_t = \mu_{t-1} + w_t,\ \ \ w_t \sim \text{Normal}(0, \sigma^2_w)
+$$
+過程誤差$w_t$の期待値は0である．$t+1$時点の状態の期待値は時点tの状態の値そのものである．よって，データが得られた最後の時点の状態推定値が将来の状態の予測値になる．だから，黒い太線は水平なのである．
+
+ローカルレベルモデルは単縦な構造であるため，将来を精度良く予測することは難しい．
+
+状態予測値の信用区間が，時点が進むにつれて広くなっている．時点が進むにつれて予測がより困難になっていることがわかる．
+
+# 欠損があるデータ
+
+欠損値の補完を試みる,
+
+```{r}
+#データの読み込み
+sales_df_NA <- read.csv("data/5-3-1-sales-ts-1-NA.csv")
+
+#日付の形式を変更する
+sales_df_NA$date <- as.POSIXct(sales_df_NA$date)
+
+head(sales_df_NA,n = 3)
+```
+# 欠損データの取り扱い
+
+- 欠損データを削除する方法
+
+na.omit関数でok!
+
+```{r}
+#NAがある行を削除
+sales_df_omit_NA <- na.omit(sales_df_NA)
+head(sales_df_omit_NA, n = 3)
+```
+
+NAが含まれる行は何行あったのか．NAを削除する前と後で行数を比較してみる
+```{r}
+#データを取得した期間
+nrow(sales_df_NA)
+
+#正しくデータが取得した日数
+nrow(sales_df_omit_NA)
+```
+26日分がNAになったらしい．
+
+- 欠損がある時点とない時点の判別
+
+is.na関数でok!
+
+```{r}
+#データがちゃんとあればTRUE
+!is.na(sales_df_NA$sales)
+```
+
+```{r}
+#データがある行番号の取得
+which(!is.na(sales_df_NA$sales))
+```
+
+27~48までの20日がまるまるない
+
+# 補完のためのStanファイルの実装
+
+ローカルレベルモデルを用いて補完を行うためのstanコードを書いて，コンパイルする
+
+```{r}
+model_2 <- cmdstan_model("stan/5_3_2.stan")
+
+model_2$print()
+```
+
+
+
+観測値が得られた個数lne_obsは，NAを含む行を削除したデータsales_df_omit_NAのgと行数と同じ74になる．
+
+modelブロックで状態の推定に関しては全く変更がない．観測に関する文のみ変更が必要．時点3が欠損であるので，この時点は観測値に関するサンプリング文をスキップしなければいけない．欠損値が得られた時点obs_noを用いて状態と観測のズレた要素番号を一致させる．
+
+# ローカルレベルモデルによる補完の実行
+
+実際にローカルレベルモデルを推定する
+```{r}
+#データの準備
+data_list_interpolation <- list(
+  T = nrow(sales_df_NA),
+  len_obs = nrow(sales_df_omit_NA),
+  y = sales_df_omit_NA$sales,
+  obs_no = which(!is.na(sales_df_NA$sales))
+)
+
+#モデルの推定
+local_level_interpolation <- model_2$sample(
+  data = data_list_interpolation,
+  seed = 1,
+  chains = 4,
+  refresh = 2000,
+  iter_warmup = 2000,
+  iter_sampling = 2000
+)
+```
+
+
+推定結果を図示する
+```{r}
+#乱数の抽出
+drws = local_level_interpolation$draws("mu")
+
+#推定結果の図示
+plotSSM(sample = drws,
+        time_vec = sales_df_all$date,
+        obs_vec = sales_df_all$sales,
+        graph_title = "補完の結果",
+        y_label = "sales")
+```
+
+状態の95%信用区間であるので，区間外の点が少なくない．観測値の信用区間も出す．
+
+
+```{r}
+#乱数の抽出
+drws = local_level_interpolation$draws("y_pred")
+
+#推定結果の図示
+plotSSM(sample = drws,
+        time_vec = sales_df_all$date,
+        obs_vec = sales_df_all$sales,
+        graph_title = "予測の結果",
+        y_label = "sales")
+```
+うまくできた
+
+
+
+
+
+
+

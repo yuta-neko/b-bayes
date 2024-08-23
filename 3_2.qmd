@@ -1,0 +1,195 @@
+---
+title: "実践編"
+subtitle: "2章 単回帰モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               brms)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+
+
+
+# データの読み込み
+
+```{r}
+beer_data <- read.csv("data/3-2-1-beer-sales-2.csv")
+head(beer_data)
+```
+
+```{r}
+sample_size <- nrow(beer_data)
+sample_size
+```
+- 売上と気温の関係をプロットする
+```{r}
+ggplot(data = beer_data,
+       aes(x = temperature,
+           y = sales)) + 
+  geom_point() +
+  labs(title = "ビールの売上と気温の関係")
+```
+気温が上がると売上が上がるように見える．
+
+# モデルの構造
+
+$$
+\mu = \beta_0  + \beta_1 x_i
+$$
+$$
+y \sim \mbox{Normal}(\mu,\sigma^2)
+$$
+応答変数が売上，説明変数が気温である．
+
+一つの式で表すと以下の通り
+$$
+sales_i \sim \mbox{Normal}(Intercept + bete \times temperature_i,sigma^2)
+$$
+
+# MCMCの実行
+
+リストにまとめる
+```{r}
+data_list <- list(
+  N = sample_size,
+  sales = beer_data$sales,
+  temperature = beer_data$temperature
+)
+```
+
+乱数の生成
+m
+```{r}
+#| results: hide
+mcmc_result <- stan(
+  file = "stan/3_2_1_simple_lm.stan",
+  data = data_list,
+  seed = 1
+)
+```
+
+
+```{r}
+print(mcmc_result, probs = c(0.025, 0.5, 0.975))
+#lp__は対数事後確率
+```
+事後分布の可視化のために，あらかじめサンプルを抽出する
+```{r}
+mcmc_sample <- rstan::extract(mcmc_result, permuted = FALSE)
+```
+
+# 事後分布の可視化
+
+推定されたパラメータの事後分布に加えて，トレースプロットも念の為に図示する
+```{r}
+#| fig-cap: "事後分布の可視化"
+mcmc_combo(mcmc_sample,
+           pars = c("intercept", "beta", "sigma"))
+```
+
+問題なさそう．気温が1度上昇するごとに，売り上げが2.5万円前後の上昇が期待できる．
+
+
+
+
+# test
+
+
+```{r}
+summary(mcmc_sample)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

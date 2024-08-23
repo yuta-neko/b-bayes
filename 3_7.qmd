@@ -1,0 +1,310 @@
+---
+title: "実践編"
+subtitle: "7章 正規線形モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               brms)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+# モデルの構造
+
+ある商品の売上モデルにおいて，気温と天気という2つの要因をともに組み込むことを考える．モデル式は以下の通り
+$$
+\begin{aligned}
+  & \mu_i = \beta_0 + \beta_1x_{i1}+\beta_2x_{i2} + \beta_3 x_{i3} \\
+  & y_i \sim \mbox{Nromal}(\mu_i, \sigma^2)
+\end{aligned}
+$$
+
+
+|線形予測子|複数の説明変数がある|
+|リンク関数|恒等関数|
+|確率分布|正規分布|
+
+よってこのモデルは正規線形モデル．
+
+# データの読み込みと可視化
+
+```{r}
+#分析対象のデータ
+sales_climate <- read.csv("data/3-7-1-beer-sales-4.csv")
+head(sales_climate, 3)
+```
+```{r}
+#データの要約
+summary(sales_climate)
+```
+
+```{r}
+#| fig-cap: "ビールの売上と天気・気温の散布図"
+ggplot(data = sales_climate,
+       aes(x = temperature,
+           y = sales)) +
+  geom_point(aes(colour = weather)) + 
+  labs(title = "ビールの売上と気温・天気の関係")
+```
+
+# 正規線形モデルの推定
+
+```{r}
+(formula_anova <- formula(sales ~ weather + temperature))
+design_mat <- model.matrix(formula_anova, sales_climate)
+design_mat <- tibble(design_mat)
+```
+```{r}
+data1 <- data.frame(
+  Y = sales_climate$sales,
+  X = sales_climate$temperature)
+```
+
+
+```{r}
+data2 <- data.frame(
+  D_1 = design_mat$design_mat[,"weatherrainy"],
+  D_2 = design_mat$design_mat[,"weathersunny"])
+```
+
+
+```{r}
+data = cbind(data1,data2)
+```
+
+```{r}
+temperature_pred <- 10 : 30
+```
+
+```{r}
+data_list <- list(
+  #サンプルサイズ
+  N = nrow(data),
+  
+  X = data$X,
+  
+  Y = data$Y,
+  
+  D_1 = data$D_1,
+  
+  D_2 = data$D_2,
+  
+  N_pred = length(temperature_pred),
+  
+  X_pred = temperature_pred
+)
+```
+
+```{r}
+#| results: hide
+anova_stan <- stan(
+  file = "stan/3_7_1.stan",
+  data = data_list,
+  seed = 1
+)
+```
+
+
+```{r}
+#サンプルの抽出
+
+mcmc_sample <- rstan::extract(anova_stan,permuted = FALSE)
+mcmc_sample_1 <- rstan::extract(anova_stan)$mu_pred_1
+mcmc_sample_2 <- rstan::extract(anova_stan)$mu_pred_2
+mcmc_sample_3 <- rstan::extract(anova_stan)$mu_pred_3
+```
+
+
+```{r}
+#信用区間の確認1
+
+mcmc_intervals(
+  mcmc_sample,
+  regex_pars = c("mu_pred_1."),
+  prob = 0.95)
+```
+```{r}
+#信用区間の確認2
+
+mcmc_intervals(
+  mcmc_sample,
+  regex_pars = c("mu_pred_2."),
+  prob = 0.95
+)
+```
+
+
+```{r}
+#信用区間の確認3
+
+mcmc_intervals(
+  mcmc_sample,
+  regex_pars = c("mu_pred_3."),
+  prob = 0.95
+)
+```
+
+
+
+
+```{r}
+temperature <- 10:30
+temperature <- data.frame(temperature)
+```
+
+```{r}
+
+df1 <- data.frame(
+  t(
+    apply(mcmc_sample_1,
+          2,
+          quantile,
+          probs = c(0.025, 0.5, 0.975))))
+df1 <- df1 |> 
+  rename(ymin = X2.5.,
+         ymax = X97.5.,
+         sales = X50.) |> 
+  cbind(df1,temperature)
+```
+
+```{r}
+df2 <- data.frame(
+  t(
+    apply(mcmc_sample_2,
+          2,
+          quantile,
+          probs = c(0.025, 0.5, 0.975))))
+df2 <- df2 |> 
+  rename(ymin = X2.5.,
+         ymax = X97.5.,
+         sales = X50.) |> 
+  cbind(df2,temperature)
+```
+
+```{r}
+df3 <- data.frame(
+  t(
+    apply(mcmc_sample_3,
+          2,
+          quantile,
+          probs = c(0.025, 0.5, 0.975))))
+df3 <- df3 |> 
+  rename(ymin = X2.5.,
+         ymax = X97.5.,
+         sales = X50.) |> 
+  cbind(df3,temperature)
+```
+
+
+```{r}
+#| fig-cap: "回帰直線に95%信用区間を重ねて図示した"
+fig_7_1 <- ggplot(data = sales_climate,
+       aes(x = temperature,
+           y = sales)) +
+  geom_point(data = sales_climate,
+             aes(colour = weather)) + 
+  
+  geom_line(data = df1,
+            aes(y = sales,
+                x = temperature,
+                colour = "cloudy"))+
+  geom_ribbon(data = df1,
+              aes(ymax = ymax,
+                  ymin = ymin,
+                  x = temperature,
+                  fill  = "cloudy"),
+              alpha = 0.2)+
+  
+  geom_line(data = df2,
+            aes(y = sales,
+                x = temperature,
+                colour  = "rainy"))+
+    geom_ribbon(data = df2,
+              aes(y = sales,
+                  ymax = ymax,
+                  ymin = ymin,
+                  x = temperature,
+                  fill = "rainy"),
+              alpha = 0.2)+
+  
+  geom_line(data = df3,
+            aes(y = sales,
+                x = temperature,
+                color = "sunny")) +
+      geom_ribbon(data = df3,
+              aes(y = sales,
+                  ymax = ymax,
+                  ymin = ymin,
+                  x = temperature,
+                  fill = "sunny"),
+              alpha = 0.2)+
+  
+  labs(title = "ビールの売上と気温・天気の関係") 
+plot(fig_7_1)
+```
+
+
+
+
+# test
+
+

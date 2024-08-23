@@ -1,0 +1,163 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "1章 時系列分析と状態空間モデルの基本"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+# 時系列データ
+
+- 時系列:時点ごとの確率変数の測定値を時間順に並べた系列
+
+並びにも意味がある
+
+# データ生成過程(DGP)
+
+- データ生成過程:時間によって変化する確率分布
+
+時系列分析では，時間に応じて母数が動的に変化する
+
+時系列分析の目的は，データ生成過程を推定すること．
+
+# 状態空間モデル
+
+時系列データは**状態空間モデル**を使うことで，柔軟にモデル化ができる．それは以下のように表現される
+
+\begin{align}
+  \alpha_t &\sim f(\alpha_t|\alpha_{t-1}) \label{eqn:1} \\
+  y_t &\sim g(y_t|\alpha_t) \label{eqn:2}
+\end{align}
+
+:::{.callout-note}
+## 上の式について
+
+これは**一般化状態空間モデル**と呼ばれる
+:::
+
+式\ref{eqn:1}は状態を表すので**状態モデル**あるいは**システムモデル**と呼ばれる．方程式の形で表現されるが多い．それは**状態方程式**と呼ぶ．
+
+式\ref{eqn:1}より，マルコフ性があることがわかる．`t-1`と`t`の前後関係を表す．
+
+
+式\ref{eqn:2}は観測値が得られるプロセスを表すので**観測モデル**と呼ばれる．これも方程式の形で表現されるが多い．それは**観測方程式**と呼ぶ．
+
+式\ref{eqn:1}より，時点`t`の観測値の確率分布は，同じ時点の状態に影響される．観測誤差を観測方程式で表す．
+
+# 状態空間モデルにおける予測と補完
+
+状態空間モデルでは，将来の予測と欠損値の補完は，同じ枠組みで対応可能．
+
+- 将来の**予測**:状態方程式に基づき，過去の時点の状態を将来の状態へと更新する．`状態の予測値`が得られれば，観測方程式に基づき，`観測値の予測値`が得られる
+
+- 欠損値の**補完**:状態方程式に基づき，直前の状態推定値から将来予測をする．欠損している期間を予測値で補う．
+
+# 動的線形モデル(線形ガウス状態空間モデル)
+
+二つの方程式の確率密度関数が正規分布かつ，線形な構造のものを`線形ガウス状態空間モデル`あるいは，`動的線形モデル`と呼ぶ行列表記で以下のように表せる
+
+\begin{equation}
+  \begin{aligned}
+  \alpha_t &= \mathbf{T}_t \alpha_{t-1} + \mathbf{R}_t\xi_t,
+  &\xi_t \sim \text{Normal}(0,\mathbf{Q}_t)\\
+  \mathbf{y}_t &= \mathbf{Z}_t \alpha_{t} + \epsilon_t,
+  &\epsilon_t \sim \text{Normal}(0,\mathbf{H}_t)
+  \end{aligned}
+\end{equation}
+
+$\mathbf{T}_t,\mathbf{R}_t,\mathbf{Z}_t$はモデルの構造を決めるための行列
+
+# 動的一般化線形モデル(線形非ガウス状態空間モデル)
+
+観測値$y_t$が正規分布以外にも従うことを認めたやつを`動的一般化線形モデル`と呼ぶ
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

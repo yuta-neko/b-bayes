@@ -1,0 +1,499 @@
+---
+title: "Stan入門"
+subtitle: "cmdstanを使ってみる"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+cmdstanの使い方はわかったので，検定をやってみよう
+
+# 練習問題
+
+## 正規分布(1)
+
+以下のような身長のデータが得られたとする
+```{r}
+height <- c(162,170, 172,190,188,
+            177,173,187,163,175)
+```
+このデータを使って全体の平均身長を推測する．ただし，以下のモデルを仮定する．
+$$
+\begin{aligned}
+H_n &\sim \mbox{Normal}(\theta,\sigma)\\
+\theta &\sim \mbox{Normal}(\mu, \tau)
+\end{aligned}
+$$
+まずはstanにモデルを記述し，コンパイルする
+```{r}
+h_norm_1 <- cmdstan_model("stan/intro_1.stan")
+```
+中身を見てみる
+```{r}
+h_norm_1$print()
+```
+データをリスト形式にする
+```{r}
+list_1 <- list(N = length(height),
+               Y = height)
+```
+推定しよう
+```{r}
+#| results: hide
+fit_1 <- h_norm_1$sample(
+  data = list_1,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_sampling = 3000,
+  iter_warmup = 1000
+)
+```
+
+```{r}
+fit_1$summary()
+```
+乱数を取り出す
+```{r}
+post_1 <- fit_1$draws() |> 
+  as_draws_df()
+glimpse(post_1)
+```
+収束したかどうか確認しよう
+```{r}
+#| fig-cap: トレースプロットの図示
+trace <- ggplot(post_1,
+                aes(x = .iteration,
+                    y = theta,
+                    group = as.factor(.chain))) + 
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("theta") +
+  xlab("実行回数")
+plot(trace)
+```
+紫色の毛虫がいるので問題ない
+
+事後分布を確認しよう
+```{r}
+#| fig-cup: "事後分布の確認"
+plt <- ggplot(post_1,
+              aes(x = theta,
+                  y = after_stat(density)))+
+  geom_histogram(colour = "black") +
+  labs(x = expression(theta),
+       y = "事後確率密度")
+plot(plt)
+```
+平均と信用区間を求める
+```{r}
+#平均
+mean(post_1$theta) 
+
+#95%信用区間
+quantile(post_1$theta,probs = c(0.025,0.975))
+```
+
+## 正規分布(2)
+
+以下のようなデータが得られた
+```{r}
+height2 <- rep(height, each = 10)
+height2
+```
+もう一回推定する
+
+stanはそのまま流用する
+```{r}
+list_2 <- list(N = length(height2),
+               Y = height2)
+```
+mcmcを実行する
+```{r}
+#| results: hide
+fit_2 <- h_norm_1$sample(
+  data = list_2,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,             #コンソールに表示される結果の感覚
+  iter_warmup = 1000,         #バーンイン期間
+  iter_sampling = 3000        #サンプリング
+)
+```
+
+結果を表示する
+```{r}
+fit_2$summary("theta")
+```
+ 乱数を取り出す
+```{r}
+post_2 <- fit_2$draws() |> 
+  as_draws_df()
+glimpse(post_2)
+```
+分布の収束を確認しよう
+
+まずはトレースプロットから
+```{r}
+#| fig-cup: "トレースプロットの図示"
+trace <- ggplot(post_2,
+                aes(x = .iteration,
+                    y = theta,
+                    group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("theta")+
+  xlab("実行回数")
+plot(trace)
+```
+毛虫の存在を確認．問題なし．
+
+続いて事後分布を確認する
+```{r}
+#| fig-cap: "事後分布の確認"
+plt <- ggplot(post_2,
+              aes(x= theta,
+                  y = after_stat(density)))+
+  geom_histogram(colour = "black")+
+  labs(x = expression(theta),
+       y = "事後確率密度")
+plot(plt)
+```
+サンプルから平均と信用区間を求める
+```{r}
+#平均
+mean(post_2$theta)
+
+#95%信用区間
+quantile(post_2$theta,
+         probs = c(0.025, 0.975))
+```
+
+信用区間が狭くなっている．サンプルサイズはでかい方が良いらしい．
+
+## 平均の差の検定(1)
+
+2つのコーヒーチェーンの味を比較するために，各チェーン店の客に点数をつけてもらった．その結果以下のような(対応のないデータ)が得られた
+
+```{r}
+t <- c(95, 95, 85, 90, 85, 75, 85, 85, 75, 65)
+s <- c(90, 85, 85, 80, 85, 70, 85, 75, 80, 60)
+
+#tの平均
+mean(t)
+
+#sの平均
+mean(s)
+```
+標本平均ではtの方が美味しそうであるが，母集団ではどうだろうか．$\theta_t$と$\theta_s$を推定したい．
+
+まずはデータを整理する
+```{r}
+list_3 <- list(
+  Nt = length(t),
+  Ns = length(s),
+  t = t,
+  s = s
+)
+```
+
+モデルをstanに記述する．できたらコンパイルして中身を確認する
+```{r}
+ts_1 <- cmdstan_model("stan/intro_2.stan")
+```
+```{r}
+ts_1$print()
+```
+では早速mcmcを実行する
+```{r}
+#| results: hide
+fit_3 <- ts_1$sample(
+  data = list_3,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_sampling = 3000,
+  iter_warmup = 1000
+)
+```
+結果を確認しよう
+```{r}
+fit_3$summary()
+```
+rhatによると収束に問題はないようである．
+
+乱数を取りだし，収束を可視化しよう
+```{r}
+post_3 <- fit_3$draws() |> 
+  as_draws_df()
+glimpse(post_3)
+```
+まずはトレースプロットから
+```{r}
+#| fig-cup: "トレースプロットの図示"
+
+trace_t <- ggplot(post_3,
+                aes(x = .iteration,
+                    y = theta_t,
+                    group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("theta_t")+
+  xlab("実行回数")+
+  labs(title = "tのtheta")
+
+trace_s <- ggplot(post_3,
+                aes(x = .iteration,
+                    y = theta_s,
+                    group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("theta_s")+
+  xlab("実行回数")+
+  labs(title = "sのtheta")
+
+plot(trace_t/ trace_s)
+```
+毛虫が2匹いるので問題なし．
+
+次に事後分布を確認する
+```{r}
+#| fig-cap: "事後分布の確認"
+
+
+plt_t <- ggplot(post_3,
+                aes(x = theta_t,
+                    y = after_stat(density)))+
+  geom_histogram(colour = "black")+
+  labs(x = expression(theta[t]),
+       title = "tのtheta",
+       y = "事後確率密度")
+
+plt_s <- ggplot(post_3,
+                aes(x = theta_s,
+                    y = after_stat(density)))+
+  geom_histogram(colour = "black")+
+  labs(x = expression(theta[s]),
+       title = "sのtheta",
+       y = "事後確率密度")
+
+plot(plt_t/plt_s)
+```
+$\theta_t > \theta_s$であるかどうかが知りたいので，$\theta_t - \theta_s$を計算する．
+```{r}
+post_3 <- post_3 |> 
+  mutate(dif = theta_t- theta_s)
+```
+こいつの事後分布を図示しよう
+```{r}
+#| fig-cap: "差の事後分布の確認"
+plt <- ggplot(post_3,
+              aes(x = dif,
+                  y = after_stat(density)))+
+  geom_histogram(color = "black")+
+  geom_vline(xintercept = 0, color = "tomato")+
+  labs(x = expression(theta[t] - theta[s]),
+       y = "事後確率密度")
+plot(plt)
+```
+$\theta_t - \theta_s > 0$の確率は
+```{r}
+mean(post_3$dif > 0)
+```
+約80%の確率でtの方が評価が高い．$\theta_t > \theta_s$というには十分な証拠がない．帰無仮説を保留する．
+
+
+## 平均の差の検定(2)
+
+以下のようなデータが得られたとする．
+
+```{r}
+t2 <- rep(t, each = 10)
+s2 <- rep(s, each = 10)
+```
+
+stanはそのまま流用できるため，listだけ変更してmcmcを実行しよう
+```{r}
+list_4 <- list(
+  Nt = length(t2),
+  Ns = length(s2),
+  t = t2,
+  s = s2
+)
+```
+
+```{r}
+ts_2 <- cmdstan_model("stan/intro_2.stan")
+```
+```{r}
+#| results: hide
+
+
+fit_4 <- ts_2$sample(
+  data = list_4,
+  seed = 1,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 3000
+)
+```
+乱数を取り出して結果を確認する
+```{r}
+post_4 <- fit_4$draws() |> 
+  as_draws_df()
+glimpse(post_4)
+```
+まずはトレースプロットから
+```{r}
+#| fig-cup: "トレースプロットの図示"
+
+trace_t <- ggplot(post_4,
+                aes(x = .iteration,
+                    y = theta_t,
+                    group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("theta_t")+
+  xlab("実行回数")+
+  labs(title = "tのtheta")
+
+trace_s <- ggplot(post_4,
+                aes(x = .iteration,
+                    y = theta_s,
+                    group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("theta_s")+
+  xlab("実行回数")+
+  labs(title = "sのtheta")
+
+plot(trace_t/ trace_s)
+```
+毛虫が2匹いるので問題はなさそう
+
+次に事後分布を確認する
+```{r}
+#| fig-cap: "事後分布の確認"
+
+
+plt_t <- ggplot(post_4,
+                aes(x = theta_t,
+                    y = after_stat(density)))+
+  geom_histogram(colour = "black")+
+  labs(x = expression(theta[t]),
+       title = "tのtheta",
+       y = "事後確率密度")
+
+plt_s <- ggplot(post_4,
+                aes(x = theta_s,
+                    y = after_stat(density)))+
+  geom_histogram(colour = "black")+
+  labs(x = expression(theta[s]),
+       title = "sのtheta",
+       y = "事後確率密度")
+
+plot(plt_t/plt_s)
+```
+$\theta_t > \theta_s$であるかどうかが知りたいので，$\theta_t - \theta_s$を計算する．
+```{r}
+post_4 <- post_4 |> 
+  mutate(dif = theta_t- theta_s)
+```
+こいつの事後分布を図示しよう
+```{r}
+#| fig-cap: "差の事後分布の確認"
+plt <- ggplot(post_4,
+              aes(x = dif,
+                  y = after_stat(density)))+
+  geom_histogram(color = "black")+
+  geom_vline(xintercept = 0, color = "tomato")+
+  labs(x = expression(theta[t] - theta[s]),
+       y = "事後確率密度")
+plot(plt)
+```
+$\theta_t - \theta_s > 0$の確率は
+```{r}
+mean(post_4$dif > 0)
+```
+約99%の確率でtの評価が高い．帰無仮説を棄却する．やっぱりサンプルサイズは大きい方が良さそう．
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,508 @@
+---
+title: "実践編"
+subtitle: "ロジティック回帰モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+# モデルの構造
+
+ある種子の発芽率のモデル化を試みる．植木鉢に種を10粒まいた．試行回数10の二項分布でいけそう．
+
+$$
+\begin{aligned}
+  & \mbox{logit}(p_i) = \beta_0 + \beta_1 x_{i1} + \beta_2 x_{i2} \\
+  & y_i \sim \mbox{Binom}(10, p_i)
+\end{aligned}
+$$
+確率は0から1の範囲しか取らない．ロジット関数の逆関数たるロジスティック関数は確率の変化を見るのに便利である．ロジスティック関数は0から1の範囲しか取らない．本当に？
+
+ロジスティック関数を定義して，プロットしてみよう
+```{r}
+#関数の定義
+
+logistic <- function(x){
+  1 / (1 + exp(-x))
+}
+logit <- function(x){
+  log(x/(1-x))
+}
+odds <- function(x){
+  x/(1-x)
+}
+```
+```{r}
+#データを用意してfor回す
+
+x <- -10:10
+N <- length(x)
+y <- rep(NA, N)
+for(i in 1:N){
+  y[i] = logistic(x[i])
+}
+data <- tibble(x = x,
+               y = y)
+```
+
+```{r}
+#| fig-cap: "ロジスティック関数"
+#プロット
+
+ggplot(data = data,
+       aes(x = x,
+           y = y))+
+  geom_line()
+```
+
+
+このロジスティック関数を用いることでモデルは以下のように表記できる．
+$$
+\begin{aligned}
+  & p_i = \beta_0 + \beta_1 x_{i1} + \beta_2 x_{i1} \\
+  & y_i \sim \mbox{Binom}(10, \mbox{logistic}(p_i))
+\end{aligned}
+$$
+
+# データの読み込みと可視化
+
+```{r}
+#分析対象のデータ
+
+dat <- read.csv("data/3-9-1-germination.csv")
+head(dat)
+summary(dat)
+```
+発芽した数とに日照・栄養素の関係を散布図で確認する
+```{r}
+#| fig-cap: "種子の発芽数と日照・栄養素の散布図"
+ggplot(data = dat,
+       aes(x = nutrition,
+           y = germination)) +
+  geom_point(aes(colour = solar)) +
+  ylab("発芽数") +
+  xlab("栄養素")
+```
+
+# 回帰モデルの推定
+
+まずはいい感じのデータフレームを作る．
+```{r}
+mat <- data.frame(
+  model.matrix(
+    formula(~solar), dat))
+Y <- dat$germination
+X <- dat$nutrition
+df <- data.frame(Y = Y,
+                 X = X,
+                 D = mat$solarsunshine,
+                 S = dat$size)
+X_pred <- 0:10
+```
+
+
+
+これをlistにしてあげる.mcmcのために
+```{r}
+list <- list(
+  Y = df$Y,
+  X = df$X,
+  D = df$D,
+  N = 100,
+  
+  #予測
+  N_pred = length(X_pred),
+  X_pred = X_pred       #10は試行回数
+)
+```
+リストにできたのでmcmcを実行しよう
+
+//できない!7/11
+
+//できた!7/12
+
+//予測ができん
+
+//できた
+```{r}
+#| results: hide
+results <- stan(
+  file = "stan/3_9.stan",
+  data = list
+)
+```
+
+信用区間を確認する
+```{r}
+print(results,
+      pars = c("beta_0", "beta_1", "beta_2"),
+      probs = c(0.025, 0.5, 0.975))
+```
+
+サンプルを抽出する．
+```{r}
+sample <- rstan::extract(results,permuted = FALSE)
+p1 <- rstan::extract(results)$P_1
+p2 <- rstan::extract(results)$P_2
+y1 <- rstan::extract(results)$Y_1
+y2 <- rstan::extract(results)$Y_2
+```
+
+
+
+ちゃんと定常分布に収束したか確認する
+```{r}
+#| fig-cap: "パラメータの事後分布とそれに従う乱数"
+mcmc_combo(sample,
+          pars = c("beta_0", "beta_1", "beta_2"))
+```
+毛虫になったのでよし
+
+パラメータの信用区間も図示する
+```{r}
+#| fig-cap: "パラメータの信用区間"
+mcmc_areas(sample,
+           pars = c("beta_0", "beta_1", "beta_2"),
+           prob = 0.6,
+           prob_outer = 0.99)
+```
+beta_2は尖度が高そう．
+
+収束に問題はなさそうである．回帰係数の信用区間は正の値をとっている．効果はあるとみて良い．
+
+
+# 推定されたモデルの解釈
+
+リンク関数がロジット関数であるため係数の解釈がやや複雑である．まずは**オッズ**を考えよう．これは「失敗するよりも何倍成功しやすいか」を表した指標である．
+$$
+\mbox{オッズ} = \frac{p}{1 - p}
+$$
+オッズの変化率を**オッズ比**呼ぶ．
+$$
+\mbox{オッズ比} = \frac{odds_{t}}{odds_{t-1}}
+$$
+ロジスティック回帰モデルの係数にexpを適用すると，オッズ比になる．
+$$
+exp(\beta) = \mbox{オッズ比}
+$$
+なので，回帰係数は**対数オッズ比**と解釈できる
+$$
+\beta = log(\mbox{オッズ比})
+$$
+
+
+
+# 回帰曲線の図示
+
+後々使うであろう期待値と予測値のデータをdfにまとめておく
+
+まずはp
+```{r}
+#影の時のp
+
+
+p1_mean <- data.frame(apply(p1,2,mean))　　　　　　　　#平均の計算
+
+p1_95 <- data.frame(
+  t(
+    apply(p1,2,quantile,probs = c(0.025,0.975))))　　　#95%の計算
+
+p1 <- cbind(p1_mean, p1_95)　　　　　　　　　　　　　　#結合
+
+p1 <- p1 |> 
+  cbind(X_pred) |> 
+  rename(germination = apply.p1..2..mean.,
+         ymin = X2.5.,
+         ymax = X97.5.) |> 
+  #試行回数に合わせて10倍しないとうまくプロットできない
+  mutate(germination = 10 * germination,
+         ymin = 10 * ymin,
+         ymax = 10 * ymax)
+
+#日光下のp
+
+
+p2_mean <- data.frame(apply(p2,2,mean))　　　　　　　#平均の計算
+
+p2_95 <- data.frame(
+  t(
+    apply(p2,2,quantile,probs = c(0.025,0.975))))　　#95％の計算
+
+p2 <- cbind(p2_mean, p2_95)　　　　　　　　　　　　　#結合
+
+p2 <- p2 |> 
+  cbind(X_pred) |> 
+  rename(germination = apply.p2..2..mean.,
+         ymin = X2.5.,
+         ymax = X97.5.) |> 
+  #試行回数に合わせて10倍しないとうまくプロットできない
+  mutate(germination = 10 * germination,
+         ymin = 10 * ymin,
+         ymax = 10 * ymax)
+```
+
+次にy
+```{r}
+#影の時のy
+y1 <- data.frame(
+  t(
+    apply(y1,2,quantile,probs = c(0.005, 0.5,0.995))))
+y1 <- y1 |> 
+  cbind(X_pred) |> 
+  rename(germination = X50.,
+         ymin = X0.5.,
+         ymax = X99.5.)
+
+#日光下のy
+y2 <- data.frame(
+  t(
+    apply(y2,2,quantile,probs = c(0.005, 0.5,0.995))))
+y2 <- y2 |> 
+  cbind(X_pred) |> 
+  rename(germination = X50.,
+         ymin = X0.5.,
+         ymax = X99.5.)
+```
+
+
+
+まずは信用区間を図示する
+```{r}
+#| fig-cap: "信用区間の図示"
+#基本的な散布図のプロット
+ggplot(data = dat,
+       aes(x = nutrition,
+           y = germination)) +
+  geom_point(aes(colour = solar)) +
+  
+#sunshine
+  geom_smooth(data = p2,
+             aes(x = X_pred,
+                 y = germination,
+                 colour = "sunshine"),
+             se = FALSE)+
+  geom_ribbon(data = p2,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  x = X_pred,
+                  colour = "sunshine"),
+              alpha = 0.2)+
+  
+#shadow
+  geom_smooth(data = p1,
+            aes(x = X_pred,
+                y = germination,
+                colour = "shade"),
+            se = FALSE)+
+  geom_ribbon(data = p1,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  x = X_pred,
+                  colour = "shade"),
+              alpha = 0.2)+
+  
+  ylab("発芽")+
+  xlab("栄養素")+
+  labs(title = "回帰曲線と95%信用区間")
+
+#成功確率の信用区間を図示するにあたって，数値を10倍している．
+#これは試行回数が10であるため，そのような処置を取らないとうまくプロットできないからである
+#と考えている．具体的な論理はしらない
+```
+
+
+次に予測区間を図示する
+```{r}
+#| fig-cap: "予測区間の図示"
+#基本的な散布図のプロット
+ggplot(data = dat,
+       aes(x = nutrition,
+           y = germination)) +
+  geom_point(aes(colour = solar)) +
+  
+#sunshine
+  geom_smooth(data = y2,
+             aes(x = X_pred,
+                 y = germination,
+                 colour = "sunshine"),
+             se = FALSE)+
+  geom_ribbon(data = y2,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  x = X_pred,
+                  colour = "sunshine"),
+              alpha = 0.2)+
+  
+#shadow
+  geom_smooth(data = y1,
+            aes(x = X_pred,
+                y = germination,
+                colour = "shade"),
+            se = FALSE)+
+  geom_ribbon(data = y1,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  x = X_pred,
+                  colour = "shade"),
+              alpha = 0.2)+
+  
+  ylab("発芽")+
+  xlab("栄養素")+
+  labs(title="回帰曲線と99%予測区間")
+```
+
+
+
+
+
+
+# test
+
+```{r}
+ggplot(data = dat,
+       aes(x = nutrition,
+           y = germination))+
+   geom_ribbon(data = p2,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  x = X_pred,
+                  colour = "sunshine"),
+              alpha = 0.2)+
+  geom_ribbon(data = p1,
+              aes(ymin = ymin,
+                  ymax = ymax,
+                  x = X_pred,
+                  colour = "shade"),
+              alpha = 0.2)
+```
+
+
+```{r}
+x = seq(-3,3, length.out = 300)
+y = pnorm(x)
+data = data.frame(x = x,
+                  y = y)
+ggplot(data = data,
+  aes(x = x,
+           y = y))+
+  geom_line()
+```
+
+```{r}
+x = seq(-3,3, length.out = 300)
+y = dnorm(x)
+data = data.frame(x = x,
+                  y = y)
+ggplot(data = data,
+  aes(x = x,
+           y = y))+
+  geom_line()
+```
+
+
+```{r}
+x = seq(0,10,length.out = 200)
+y <-  log(x)
+data = data.frame(x = x,
+                  y = y)
+ggplot(data = data,
+       aes(x = x,
+           y = y))+
+  geom_line()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

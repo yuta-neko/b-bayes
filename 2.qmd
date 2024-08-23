@@ -1,0 +1,584 @@
+---
+title: "ベイズ統計学"
+subtitle: "基礎編"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+
+```{r global_option}
+#| include: false
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+```
+
+
+```{r}
+#| echo: false
+#| message: false
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot)
+## 図のなかで日本語を使えるようにする
+## 大学PCを利用：Windows を想定
+## フォントの設定はお好みで
+## （Unix/Linux ではIPAexフォントのインストールが必要かも）
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+```{r}
+#| echo: false
+#| message: false
+library(rstan)#パッケージの読み込み
+rstan_options(auto_write = TRUE) #計算の高速化
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+# 4章 Stanの基本
+
+
+データの読み込み
+
+```{r}
+beer1 <- read.csv("data/2-4-1-beer-sales-1.csv")
+summary(beer1)
+```
+サンプルサイズの確認
+```{r}
+sample_size <- nrow(beer1)
+sample_size
+```
+
+データをlist形式にしてやる
+```{r}
+data_list <- list(sales = beer1$sales, N = sample_size)
+data_list
+```
+
+MCMCの実行
+```{r}
+mcmc_result_1 <- stan(
+  file = "2-4-2-calc-mean-variance-vec.stan", #stanファイルの指定
+  data = data_list,                           #対象データ
+  seed = 1,                                   #乱数の種
+  chains = 4,                                 #チェーン数
+  iter = 2000,                                #乱数生成の繰り返し数
+  warmup = 1000,                              #バーンイン期間
+  thin = 1                                    #間引き数(1なら間引きなし)
+)
+```
+結果を表示する
+```{r}
+print(
+  mcmc_result_1,
+  probs = c(0.025, 0.5, 0.975)
+)
+```
+トレースプロット(バーンイン期間なし)
+```{r}
+traceplot(mcmc_result_1)
+```
+トレースプロット(バーンイン期間あり)
+```{r}
+traceplot(mcmc_result_1, inc_warmup = T)
+```
+背景がグレーになっている区間がバーンイン区間．
+
+# 5章 MCMCの結果の評価
+
+## サンプルの抽出
+
+mcmcサンプルを抽出してる．
+```{r}
+mcmc_sample <- rstan::extract(mcmc_result_1, permuted = FALSE)
+```
+クラスを確認する
+```{r}
+class(mcmc_sample)
+```
+次元を確認する
+```{r}
+dim(mcmc_sample)
+```
+中身の名称を確認する
+```{r}
+dimnames(mcmc_sample)
+```
+パラメータmuの，「1回目のチェーンで得られた,最初のmcmcサンプル」を取り出す．
+```{r}
+mcmc_sample[1, "chain:1", "mu"]
+```
+[バーンイン後1回目のiter,1つ目のチェーン,パラメータはmu]
+
+パラメータmuの1回目のチェーンのMCMCサンプルの個数
+```{r}
+length(mcmc_sample[, "chain:1", "mu"])
+```
+
+## MCMCサンプルの代表値の計算
+
+MCMCサンプルができたので，これを使って事後分布の代表値の計算をする．
+
+扱いやすくするためにベクトルに変換する
+```{r}
+mu_mcmc_vec <- as.vector(mcmc_sample[,,"mu"])
+```
+事後中央値
+```{r}
+median(mu_mcmc_vec)
+```
+事後平均値
+```{r}
+mean(mu_mcmc_vec)
+```
+95%確信区間を求める
+```{r}
+quantile(mu_mcmc_vec, probs = c(0.025, 0.975))
+```
+上記の結果はpriont()関数を使って出した結果と値が一致している．
+
+## トレースプロットの描画
+
+traceplot()関数ではなく，MCMCサンプルを使うことでもトレースプロットを描ける．
+```{r}
+mcmc_trace(mcmc_sample, 
+           pars = c("mu"))
+```
+
+## ggplot2による事後分布の可視化
+
+MCMCサンプルを時系列で並べてずしするとトレースプロットになる．MCMCサンプルをすべてまとめてカーネル密度推定をすると，パラメータの事後分布のグラフが描ける．
+
+パラメータ$\mu$の事後分布のカーネル密度推定を示す．
+```{r}
+mu_df <- data.frame(
+  mu_mcmc_sample = mu_mcmc_vec
+)
+ggplot(data = mu_df,
+       mapping = aes(x = mu_mcmc_sample)) + 
+  geom_density(size = 1.5)
+```
+
+## bayesplotによる事後分布の可視化
+
+muとsigmaの2つのパラメータのMCMCサンプルのヒストグラムを描く．
+```{r}
+mcmc_hist(mcmc_sample, pars = c("mu", "sigma"))
+```
+密度は以下のように描ける．
+```{r}
+mcmc_dens(mcmc_sample, pars = c("mu", "sigma"))
+```
+トレースプロットは以下のように描ける
+```{r}
+mcmc_trace(mcmc_sample, pars = c("mu", "sigma"))
+```
+事後分布とトレースプロットをまとめて図示する．
+```{r}
+mcmc_combo(mcmc_sample, pars = c("mu","sigma"))
+```
+
+## beyesplotによる事後分布の範囲の比較
+
+興味のある2つ以上のパラメータを比較する場合には以下のコードを実行する
+```{r}
+mcmc_intervals(
+  mcmc_sample, pars = c("mu", "sigma"),
+  prob = 0.8,
+  prob_outer = 0.9
+)
+```
+密度を合わせて描画することも可能である．
+```{r}
+mcmc_areas(mcmc_sample, 
+           pars = c("mu", "sigma"),
+           prob = 0.6,
+           prob_outer = 0.99)
+```
+## bayesplotによるMCMCサンプルの自己相関の評価
+
+サンプリングのチェックを行うためのグラフを描画する．以下のコードでMCMCサンプリングの自己評価を評価するためのコレログラムを描く．
+```{r}
+mcmc_acf_bar(mcmc_sample, pars = c("mu", "sigma"))
+```
+縦軸が自己相関係数，横軸が次数となっているコレログラムが描かれる．
+
+## 事後予測チェックの概要
+
+推定されたモデルを総合的に評価する方法を説明する．確率モデルを設計するときに仮定した事柄が現実的であったかも評価の対象である．ここでは，モデルがデータとよく適合しているかを判断するために，**事後予測チェック**を行う．
+
+統計モデルとは，「観測したデータを生み出す過程を簡潔に記述したもの」である．データによく適合する統計モデルを推定できていたならば，その統計モデルを用いることで「観察データとよく似たデータ」が得られるはずである．それを**事後予想分布**と呼ぶ．事後予想分布と実際の観測データの分布を比較して，両者が似ていることを確認するのが基本的な方針である．
+
+## 事後予測チェクの対象となるデータとモデル
+
+ある小動物の発見個体数のモデル化に取り組む．草原の中に，その動物は群れを作ることなくランダムに生息している．10m四方の複数の観測地点を200地点設定して，各々の観測地点において発見された動物の個体数を数えた．
+
+当然個体数は自然数に限定されるはずである．草原は広いため，ある区域を指定してもそこに動物がいる確率は低いことが予想される．ので，試行回数Nが大きくて，発生確率pが小さな二項分布でこの状況を表現できそうである．そして，「試行回数Nが大きくて，発生確率pが小さな二項分布」はポアソン分布とみなせる
+
+まとめると，今回の小動物の発見個体数データから得られる確率的な過程は，強度$\lambda$のポアソン分布だと想定できそうである．強度$\lambda$というパラメータを推定することで，ある小動物の発見個体数という観測データが得られる過程を記述できそうだ．
+
+ここで，誤ったモデルとして，小動物の発見個体数は正規分布に従うというモデルも推定してみる．正規分布は実数が出力されるので，個体数のカウントとしては完全に誤りである．
+```{r} 
+animal_num <- read.csv("data/2-5-1-animal-num.csv")
+summary(animal_num)
+```
+stanファイルを2つ作り，モデルを二つ記述した．
+
+## 予測分布の考え方
+
+poissonのstanファイルを例に，予測分布を得るコードの解釈を試みる．
+
+例えば，推定の結果が「個体数が強度4のポアソン分布に従う」ことを示唆しているとする．ならば，「強度4のポアソン分布」は「将来的に手に入る観測値の分布」として使えそうである．が，実際には強度$\lambda$の事後分布が得られる．
+
+- 予測分布とは，データyが与えられた時の，将来的な観測値*pred*の従う確立分布の確率質量関数を指す．$f(pred|y)$
+
+強度$\lambda$が与えられた時の*pred*の確率質量関数は$f(pred|\lambda)$となる．今回の事例では，これはポアソン分布の確率質量関数である．$\lambda$の事後分布の確率密度関数を$f(\lambda|y)$とおくと，予測分布は以下の計算により求められる
+$$f(pred|y) = \int f(pred|\lambda) f(\lambda|y)d\lambda$$
+この計算はめんどくさい．ので，モンテカルロ法を活用する．
+
+まず,$\lambda$のMCMCサンプルを得る．そして$\lambda$のMCMCサンプルを母数としたポアソン分布に従う乱数を得る．この乱数が,*pred*のMCMCサンプルになるのである．これがstanファイルの4つ目のブロックの意味である．
+
+あとは，*pred*のMCMCサンプルの中央値や2.5%点・97.5%点等得ることで事後予測値の点推定値や確信区間を計算できる．今回は事後予測チェックを行う目的で*pred*のMCMCサンプルを活用する．
+
+## 事後予測のためのMCMCの実行
+
+```{r}
+sample_size <- nrow(animal_num)
+data_list <- list(animal_num = animal_num$animal_num, N = sample_size)
+mcmc_normal <- stan(
+  file = "2-5-normal.stan",
+  data = data_list,
+  seed = 1
+)
+mcmc_poisson <- stan(
+  file = "2-5-poisson.stan",
+  data = data_list,
+  seed = 1
+)
+```
+stanファイルの中で#を使うとバグる．
+
+## bayesplotによる事後予測チェック
+
+最後のブロックで生成した*pred*のMCMCサンプルを取得する．
+```{r}
+y_rep_normal <- rstan::extract(mcmc_normal)$pred
+y_rep_poisson <- rstan::extract(mcmc_poisson)$pred
+```
+
+predのMCMCサンプルは，4000行200列ある．
+```{r}
+dim(y_rep_normal)
+```
+200個で1セットのpredのMCMCサンプルが4000回生成されたことがわかる．特に引数を指定してないので，1チェーンは1000で4チェーンある．
+
+試しにpredのMCMCサンプルを1セット取り出してみる．
+```{r}
+y_rep_normal[1,]
+```
+
+```{r}
+y_rep_poisson[1,]
+```
+ヒストグラムで観測データの分布と事後分布を比較する．
+```{r}
+hist(animal_num$animal_num) #これは観測データの分布
+hist(y_rep_normal[1,])　#normを仮定したときの事後予測分布
+hist(y_rep_poisson[1,]) #ポアソンを仮定したときの事後予測分布
+```
+
+同じことをbayesplotでもしてみる
+```{r}
+# 正規分布を仮定したモデルの事後予測分布
+# 1~5回めのやつ
+ppc_hist(y = animal_num$animal_num,
+         yrep = y_rep_normal[1:5, ])
+```
+
+濃い青のヒストグラムが観測データの分布である．形状は似ても似つかない．このモデルを信じて将来予測をするのは問題がある．
+
+```{r}
+# ポアソン分布を仮定したモデル
+ppc_hist(y = animal_num$animal_num,
+         yrep = y_rep_poisson[1:5, ])
+```
+
+すごくいい感じ．
+
+```{r}
+traceplot(mcmc_normal,pars = c("pred[1]"))
+```
+
+# 6章 Stanコーディングの詳細
+
+## stanファイルの構造
+
+ブロックごとの構成になってる.
+
+|ブロック|意味|
+|--|--|
+|function|自作の関数の定義|
+|data|使用されるデータやサンプルサイズの定義の定義|
+|transformed data|データの変換の指定|
+|parameters|事後分布を得たいパラメータの一覧の定義|
+|transformed parameters|パラメータの変換の指定|
+|model|モデルの構造の指定|
+|generated quantities|モデルの推定とは別に事後分布を得たい場合に指定|
+
+全てのブロックを使う必要はなく，必要に応じて使う
+
+## 変数の宣言
+
+dataブロックやparametersブロックでは，データ型の宣言が必要である．int?real?
+```
+int N; //整数型の変数Nの宣言
+real beta; //実数値型の変数betaの宣言
+```
+整数も実数も範囲指定ができる．指定はベクトルでも行列でも良い
+```
+real<lower=0> sigma;   //0以上の実数値型の変数sigmaの宣言
+vector[3] retu;        //3つの要素を持つ列ベクトルretuの宣言
+row_vector[10] gyou;   //10個の要素を持つ行ベクトルgyouの宣言
+matrix[3,2] mat;       //3行2列の行列matの宣言
+```
+配列もok
+```
+int W[10];          //整数型を10個要素にもつ配列Wの宣言
+real X[3,4]         //実数型を要素にもつ3行4列の配列Xの宣言
+vector[4] Y[2]      //[4つの要素を持つベクトル]を2つ持つ配列Yの宣言
+matrix[3,4] Z[5,6]  //[3行4列の行列]を要素にもつ5行6列の配列Zの宣言
+```
+
+## 代入文
+
+transformed dataブロックやtranceformed parameters dataブロックなどでは，データやパラメータの変換が行われる．変換をする場合は以下の**代入文**を用いる
+
+transformed_mu = exp(mu);           //変数muのexpをとったtransformed_muを得る
+
+## サンプリング分
+
+データやパラメータの宣伝の次は，モデルの構造を記述する．modelブロックでは**サンプリング文**を用いる．これは事前分布の指定にも用いられる．観測データが平均$\mu$，分散$\sigma^2$の正規分布からサンプリングされたとする．モデル式は
+$$
+y \sim \mbox{Normal}(\mu, \sigma^2)
+$$
+このときのmodelブロックのコードは以下のようになる．
+```
+
+model{
+  y ~ normal(mu, sigma);
+}
+
+```
+
+このyはparametersで宣言された未知のパラメータでも良き．
+
+事前分布の指定を行う際は以下のようにする
+```
+model{
+  mu ~ normal(0, 1);
+  sigma ~ normal(0, 1);
+  y ~ normal(mu, sigma)
+}
+```
+事前分布を変更しても事後分布が大きく変わらないことを調べる作業を**感度分析**を呼ぶ．
+
+## 弱情報事前分布の設定
+
+muの値のおおよその範囲がわかっているならば，やや狭い事前分布として**弱情報事前分布**を指定する．
+
+例えば，-5から+5までの範囲をとると想定できるとする．事前分布の指定は以下のようになる.
+```
+beta ~ normal(0, 5);
+```
+
+```{r}
+#| echo: false
+x <- rnorm(n = 1e5, 0, 5)
+D2 <- tibble(x = x,
+             density = dnorm(x,  mean = 0, sd = 5))
+p_dens_2 <- ggplot(D2, aes(x = x, y = density)) +
+  geom_line(color = "tomato") +
+  labs(x = "X",
+       y = "確率密度",
+       title = "正規分布")
+plot(p_dens_2)
+```
+次のようなものはよくない．
+```
+beta ~ unifrom(-5, 5);
+```
+一様分布は-5以下，5以上の値を許容しない．[-5,5]はおおよその値であるのに,,,
+```{r}
+#| echo: false
+x <- runif(n = 1e5, -5, 5)
+D2 <- tibble(x = x,
+             density = dunif(x,  min = -5, max = 5))
+p_dens_2 <- ggplot(D2, aes(x = x, y = density)) +
+  geom_line(color = "tomato") +
+  labs(y = "確率密度",
+       x = "X",
+       title = "一様分布")
+plot(p_dens_2)
+```
+
+弱事前分布にはt分布もしばしば用いられる．
+
+
+## 対数密度加算文
+
+サンプリング文は**対数密度加算文**という形式でも書くことができる．この形式でしか書けないモデルも1部ある．
+
+これを
+```
+model{
+  y ~ normal(mu, sigma); #サンプル文
+}
+```
+こうする
+```
+model{
+  terget = target  + normal_lpdf(y|mu, sigma);　#対数密度加算文
+}
+```
+
+modelブロックの目的は，モデルの尤度と事前分布を指定することである．ここで，サンプルサイズNのデータにおける尤度関数は以下のように書ける
+$$
+\mbox{尤度関数}:f(y|\mu, \sigma^2) = \prod_{i = 1}^N \mbox{Normal}(y_i|\mu, \sigma^2)
+$$
+対数尤度は以下のように計算できる．
+$$
+\sum_{i = 1}^N \mbox{log}(\mbox{Normal}(y_i|\mu, \sigma^2))
+$$
+log(Normal())が,normal_lpdf(y|mu, sigma)に対応してる．
+
+lpdf = log probability density function
+lpmf = log probability mass function
+
+事前分布としてmu ~ normal(0, 1)とsigma ~ normal(0,1)を指定したとするとサンプリング文は次の通りになる
+```
+model{
+  target += normal_lpdf(mu|0, 1);
+  target += normal_lpdf(sigma|0,1);
+  
+  target += normal_lpdf(y|mu,sigma);
+}
+```
+
+## 平均値の差の他とgenerated quantitiesブロック
+
+このブロックでは，「モデルの推定には入らないが，別に乱数が欲しいモノ」を指定する．事後予想分布に従う乱数を得るためにしばしば用いられる．
+
+まずはデータの読み込み
+```{r}
+beer_ab <- read.csv("data/2-6-1-beer-sales-ab.csv")
+head(beer_ab, n = 3)
+```
+AとBのヒストグラムを重ねて描く
+```{r}
+ggplot(data = beer_ab,
+       aes(x = sales,
+           y = after_stat(density),
+           color = beer_name,
+           fill = beer_name)) +
+  geom_histogram(alpha = 0.5,
+                 positon = "identity") +
+  geom_density(alpha = 0.5, size = 0)
+  
+```
+Bの方が売れてるのでは？
+
+ビールの種類ごとに売り上げを抽出し，listにまとめておく．
+```{r}
+sales_a <- beer_ab$sales[1:100]
+sales_b <- beer_ab$sales[101:200]
+
+beer_list <- list(
+  sales_a = sales_a,
+  sales_b = sales_b,
+  N = 100
+)
+```
+MCMCの実行
+```{r}
+mcmc_result_2 <- stan(
+  file = "2-6.stan",
+  data = beer_list,
+  seed = 1
+)
+```
+
+結果の表示
+```{r}
+print(mcmc_result_2,
+      probs = c(0.025, 0.5, 0.975))
+```
+diffの95%確信区間は[59.97, 73.41]であった．平均の差の事後分布のグラフを図示してみる．
+```{r}
+mcmc_sample <- rstan::extract(mcmc_result_2,
+                              permuted = FALSE)
+mcmc_dens(mcmc_sample, pars = "diff")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

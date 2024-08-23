@@ -1,0 +1,971 @@
+---
+title: "実践編"
+subtitle: "10章 交互作用"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備{-}
+
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+# 質的$\times$質的
+
+## モデルの構造
+　
+2つ以上の説明変数が応答変数に与える影響をみたい．
+
+線形予測子に積を追加するだけで良い．
+
+## データの読み込みと可視化
+
+```{r}
+#読み込む
+data_1 <- read.csv("data/3-10-1-interaction-1.csv")
+
+#確認
+head(data_1, n = 3)
+
+#要約
+summary(data_1)
+```
+おそらく以下のようなモデルを想定している
+$$
+\begin{aligned}
+\mu &= \beta_0 + \beta_1 \mbox{宣伝}_i+ \beta_2 \mbox{安売り}_i + \beta_3 \mbox{交互作用}_i\\
+Y_i & \sim \mbox{Normal}(\mu, \sigma^2)
+\end{aligned}
+$$
+宣伝と安売りはダミー変数である．交互作用の回帰回帰係数は両方が1をとったときだけ役に立つ．
+
+まずはデザイン行列を作る．
+```{r}
+mat_1 <- model.matrix(~publicity+bargen, data_1)
+mat_1 <- data.frame(mat_1)
+mat_1 <- cbind(mat_1,data_1)
+```
+
+リストの作成を行う
+```{r}
+list_1 <- list(
+  N = nrow(data_1),
+  Y = mat_1$sales,
+  X_1 = mat_1$publicityto_implement,
+  X_2 = mat_1$bargento_implement,
+  N_pred = 1
+)
+```
+
+
+まずはstanでモデルを記述し，コンパイルする
+```{r}
+model_1 <- cmdstan_model("stan/3_10_1.stan")
+model_1$print()
+```
+
+なんとかコンパイルできた．MCMCを実行しよう
+```{r}
+#| results: hide
+fit_1 <- model_1$sample(
+  data = list_1,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_sampling = 2000,
+  iter_warmup = 1000
+)
+```
+結果を確認する
+```{r}
+fit_1$summary()
+```
+次のコマンドで全ての $\hat{R}$が1.1を下回っているのか確認できる
+```{r}
+all(fit_1$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+TRUEが帰ってきたので，収束に問題はなかったようである．
+
+
+乱数を取り出して，収束を確認しよう
+```{r}
+post_1 <- fit_1$draws() |> 
+  as_draws_df()
+```
+
+
+
+```{r}
+trace_1_b0 <- ggplot(post_1,
+                    aes(x = .iteration,
+                        y = beta_0,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_0")+
+  xlab("実行回数")+
+  labs(title = "beta_0")
+
+trace_1_b1 <- ggplot(post_1,
+                    aes(x = .iteration,
+                        y = beta_1,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_1")+
+  xlab("実行回数")+
+  labs(title = "beta_1")
+
+trace_1_b2 <- ggplot(post_1,
+                    aes(x = .iteration,
+                        y = beta_2,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_2")+
+  xlab("実行回数")+
+  labs(title = "beta_2")
+
+trace_1_b3 <- ggplot(post_1,
+                    aes(x = .iteration,
+                        y = beta_3,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_3")+
+  xlab("実行回数")+
+  labs(title = "beta_3")
+
+plot(trace_1_b0/trace_1_b1)
+plot(trace_1_b2/trace_1_b3)
+```
+毛虫が四匹いるので，問題なし
+
+可視化したいので，95%信用区間を計算する
+
+
+これで全部の信用区間はでた．いる行だけ取り出せばいい．予測区間も同じことをしよう
+```{r}
+#場合分けしてプロットするために必要である．
+publicity <- c("not","to_implement","not","to_implement")
+publicity <- data.frame(publicity)
+bergen <- c("not","not","to_implement","to_implement")
+bergen <- data.frame(bergen)
+
+
+#信頼区間
+conf_1 <- data.frame(t(apply(
+  post_1,
+  2,
+  quantile,
+  probs = c(0.025,0.5,0.975)
+)))
+conf_1 <- conf_1[7:10,] |> 
+  cbind(publicity)|> 
+  cbind(bergen) |> 
+  rename(sales = X50.,
+         ymin = X2.5.,
+         ymax = X97.5.)
+conf_1
+
+#予測区間
+pred_1 <- data.frame(t(apply(
+  post_1,
+  2,
+  quantile,
+  probs = c(0.005,0.5,0.995)
+)))
+pred_1 <- pred_1[11:14,] |> 
+  cbind(publicity) |> 
+  cbind(bergen) |> 
+  rename(sales = X50.,
+         ymin = X0.5.,
+         ymax = X99.5.)
+pred_1
+```
+
+## モデルの図示
+```{r}
+#| fig-cap: "信用区間の図示"
+
+#基本的なプロット
+ggplot(data = data_1,
+       aes(x = publicity,
+           y = sales))+
+  geom_point(data = data_1,
+             aes(x = publicity,
+                 y = sales,
+                 colour = bargen))+
+
+#信用区間の図示
+geom_errorbar(data = conf_1,
+              aes(y = sales,
+                  ymax = ymax,
+                  ymin = ymin,
+                  x = publicity,
+                  colour = bergen),
+              position = position_dodge(0.4),
+              width = 0.4)+
+  geom_point(data = conf_1,
+             aes(y = sales,
+                 x = publicity,
+                 colour = bergen),
+             position = position_dodge(0.4),
+             size = 3)
+```
+予測区間の図示
+```{r}
+#| fig-cap: "　予測区間の図示"
+
+#基本的なプロット
+ggplot(data = data_1,
+       aes(x = publicity,
+           y = sales))+
+  geom_point(data = data_1,
+             aes(x = publicity,
+                 y = sales,
+                 colour = bargen))+
+
+#信用区間の図示
+geom_errorbar(data = pred_1,
+              aes(y = sales,
+                  ymax = ymax,
+                  ymin = ymin,
+                  x = publicity,
+                  colour = bergen),
+              position = position_dodge(0.4),
+              width = 0.4)+
+  geom_point(data = pred_1,
+             aes(y = sales,
+                 x = publicity,
+                 colour = bergen),
+             position = position_dodge(0.4),
+             size = 3)
+  
+ 
+```
+問題なさそである．
+
+
+# 質的$\times$量的
+
+## モデル化
+
+宣伝の有無と気温を説明変数，売上を応答変数とする．
+```{r}
+#読み込み
+data_2 <- read.csv("data/3-10-2-interaction-2.csv")
+
+#確認
+head(data_2, n = 3)
+
+#要約
+summary(data_2)
+```
+
+以下のようなモデルを想定する
+$$
+\begin{aligned}
+\mu &= \beta_0 + \beta_1 \cdot \text{宣伝}_i + \beta_2 \cdot \text{気温} + \beta_3 \cdot \text{宣伝}_i \times  \text{気温}_i\\
+Y_i &\sim \text{Normal}(\mu, \sigma^2)
+\end{aligned}
+$$
+
+まずはデザイン行列を作る
+```{r}
+mat_2 <- model.matrix(~publicity , data_2)
+mat_2 <- data.frame(mat_2) |> 
+  cbind(data_2)
+
+#ついでに予測のためのデータも作っておく
+tm_pred <- c(0:30)
+```
+
+続いてリストの作成を行う．
+```{r}
+list_2 <- list(
+  N = nrow(data_2),
+  Y = mat_2$sales,
+  X_1 = mat_2$publicityto_implement,
+  X_2 = mat_2$temperature,
+  X_pred = tm_pred,
+  N_pred = length(tm_pred)
+)
+```
+
+stanでモデルを記述し，コンパイルする
+```{r}
+model_2 <- cmdstan_model("stan/3_10_2.stan")
+model_2$print(15)
+```
+
+コンパイルができたので，MCMCを実行しよう
+```{r}
+#| results: hide
+fit_2 <- model_2$sample(
+  data = list_2,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_sampling = 2000,
+  iter_warmup = 1000
+)
+```
+結果を表示する
+```{r}
+#| results: hide
+fit_2$summary()
+```
+次のコマンドで全ての $\hat{R}$が1.1を下回っているのか確認できる
+```{r}
+all(fit_2$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+TRUEが帰ってきたので，収束に問題はなかったようである．
+
+乱数を取り出して収束を確認数
+```{r}
+post_2 <- fit_2$draws() |> 
+  as_draws_df()
+```
+
+
+```{r}
+trace_2_b0 <- ggplot(post_2,
+                    aes(x = .iteration,
+                        y = beta_0,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_0")+
+  xlab("実行回数")+
+  labs(title = "beta_0")
+
+trace_2_b1 <- ggplot(post_2,
+                    aes(x = .iteration,
+                        y = beta_1,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_1")+
+  xlab("実行回数")+
+  labs(title = "beta_1")
+
+trace_2_b2 <- ggplot(post_2,
+                    aes(x = .iteration,
+                        y = beta_2,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_2")+
+  xlab("実行回数")+
+  labs(title = "beta_2")
+
+trace_2_b3 <- ggplot(post_2,
+                    aes(x = .iteration,
+                        y = beta_3,
+                        group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_3")+
+  xlab("実行回数")+
+  labs(title = "beta_3")
+
+plot(trace_2_b0/trace_2_b1)
+plot(trace_2_b2/trace_2_b3)
+```
+毛虫が四匹いるので問題なし．
+
+## モデルの図示
+
+後でcbindするやつを作成する
+```{r}
+#気温のデータ
+tm_pred <- c(0:30)
+tm_pred <- rep(tm_pred,2)
+
+#宣伝のデータ
+not <- rep("not",31)
+not <- data.frame(not) |> 
+  rename(publicity = not)
+
+to_implement <- rep("to_implement",31)
+to_implement <- data.frame(to_implement) |> 
+  rename(publicity = to_implement)
+
+publicity <- rbind(not,to_implement)
+```
+
+```{r}
+#平均
+mean_2 <- data.frame(apply(
+  post_2,
+  2,
+  mean
+))
+
+
+#信用区間
+conf_2 <- data.frame(t(apply(
+  post_2,
+  2,
+  quantile,
+  probs = c(0.025, 0.975)
+)))
+
+
+mu_mean_2 <- mean_2[7:68,]        #要らん行を全部消す
+
+conf_2 <- conf_2[7:68,] |> 
+  cbind(publicity) |> 
+  cbind(tm_pred) |> 
+  cbind(mu_mean_2) |> 
+  rename(ymin = X2.5.,
+         ymax = X97.5.,
+         temperature = tm_pred,
+         sales = mu_mean_2)
+  
+
+#予測区間
+pred_2 <- data.frame(t(apply(
+  post_2,
+  2,
+  quantile,
+  probs = c(0.005, 0.995)
+)))
+
+pred_mean_2 <- mean_2[69:130,]        #要らん行を全部消す
+
+pred_2 <- pred_2[69:130,] |> 
+  cbind(publicity) |> 
+  cbind(tm_pred) |> 
+  cbind(pred_mean_2) |> 
+  rename(ymin = X0.5.,
+         ymax = X99.5.,
+         temperature = tm_pred,
+         sales = pred_mean_2)
+```
+
+データの整形が終わったので，プロットする
+```{r}
+#| fig-cap: "信用区間の図示"
+
+#基本的なプロット
+ggplot(data_2,
+       aes(x = temperature,
+           y = sales,
+           group = publicity))+
+  geom_point(aes(colour = publicity))+
+ 
+  
+#信用区間の図示
+  geom_line(data = conf_2,
+            aes(x = temperature,
+                y = sales,
+                colour = publicity)) +
+  geom_ribbon(data = conf_2,
+              aes(x = temperature,
+                  ymin = ymin,
+                  ymax = ymax,
+                  fill = publicity),
+                  alpha = 0.5)
+```
+次は予測区間の図示
+```{r}
+#| fig-cap: "予測区間の図示"
+
+#基本的なプロット
+ggplot(data_2,
+       aes(x = temperature,
+           y = sales,
+           group = publicity))+
+  geom_point(aes(colour = publicity))+
+ 
+  
+#予測区間の図示
+  geom_line(data = pred_2,
+            aes(x = temperature,
+                y = sales,
+                colour = publicity)) +
+  geom_ribbon(data = pred_2,
+              aes(x = temperature,
+                  ymin = ymin,
+                  ymax = ymax,
+                  fill = publicity),
+              alpha = 0.2)
+```
+モデルに問題はなかったようである．
+
+
+# 量的$\times$量的
+
+## モデル化
+
+数量と数量の交互作用をモデル化する．販売する製品の種類と店員の数を説明変数に，売上を応答変数とする．
+```{r}
+#データの読み込み
+data_3 <- read.csv("data/3-10-3-interaction-3.csv")
+
+#データの確認
+head(data_3,n = 3)
+
+#データの要約
+summary(data_3)
+```
+
+このデータを可視化して確認する．
+```{r}
+#データの図示
+ggplot(data = data_3,
+       aes(x = product,
+           y = sales,
+           colour = factor(clerk)))+
+  geom_point()+
+  geom_smooth(method = "lm",
+              se = FALSE)
+```
+単に製品の数を増やしてもうい上げは伸び無さそうであるが，店員の数が多い時に製品数を増やすと売上が伸びているように見える．
+
+以下のモデルを考える
+$$
+\begin{aligned}
+\mu &= \beta_0 + \beta_1 \text{製品数}_i+ \beta_2 \text{店員の数}_i + \beta_3 \cdot \text{製品数}_i \times \text{店員の数}_i\\
+Y &\sim \text{Normal}(\mu, \sigma^2)
+\end{aligned}
+$$
+
+リストの作成を行う．
+```{r}
+#予測に使う説明変数
+X_pred <- c(10:50)
+
+#リストの作成
+list_3 <- list(
+  N = nrow(data_2),
+  Y = data_3$sales,
+  X_1 = data_3$product,
+  X_2 = data_3$clerk,
+  N_pred = length(X_pred),
+  X_pred = X_pred
+)
+```
+
+
+stanにモデルを記述しコンパイルする．
+```{r}
+model_3 <- cmdstan_model("stan/3_10_3.stan")
+model_3$print()
+```
+コンパイルも無事にできたのでMCMCを実行する
+```{r}
+#| results: hide
+fit_3 <- model_3$sample(
+  data = list_3,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_sampling = 3000,
+  iter_warmup = 1000
+)
+```
+
+結果を表示する
+```{r}
+#| results: hide
+
+#オプションでhideにしてる
+fit_3$summary()
+```
+次のコマンドで全ての $\hat{R}$が1.1を下回っているのか確認できる
+```{r}
+all(fit_3$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+TRUEが帰ってきたので，収束に問題はなかったようである．
+
+乱数を取り出して収束を収束を可視化しよう
+```{r}
+#乱数をデータフレームに格納する
+post_3 <- fit_3$draws() |> 
+  as_draws_df()
+```
+
+取り出した乱数を使ってトレースプロットの図示
+```{r}
+#可視化
+trace_3_b0 <- ggplot(data = post_3,
+                     aes(x = .iteration,
+                         y = beta_0,
+                         group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_0")+
+  xlab("実行回数")+
+  labs(title = "beta_0")
+
+trace_3_b1 <- ggplot(data = post_3,
+                     aes(x = .iteration,
+                         y = beta_1,
+                         group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_1")+
+  xlab("実行回数")+
+  labs(title = "beta_1")
+
+trace_3_b2 <- ggplot(data = post_3,
+                     aes(x = .iteration,
+                         y = beta_2,
+                         group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_2")+
+  xlab("実行回数")+
+  labs(title = "beta_2")
+
+trace_3_b3 <- ggplot(data = post_3,
+                     aes(x = .iteration,
+                         y = beta_3,
+                         group = as.factor(.chain)))+
+  geom_line(aes(colour = as.factor(.chain)))+
+  ylab("beta_3")+
+  xlab("実行回数")+
+  labs(title = "beta_3")
+
+plot(trace_3_b0 / trace_3_b1)
+plot(trace_3_b2 / trace_3_b3)
+```
+毛虫が四匹いるので，問題なし
+
+## モデルの図示
+
+後でcbindするやつを作る
+```{r}
+p1 <- rep(1,41)
+p1 <- data.frame(p1) |> 
+  rename(clerk = p1)
+
+p2 <- rep(2,41)
+p2 <- data.frame(p2) |> 
+  rename(clerk = p2)
+
+p3 <- rep(3,41)
+p3 <- data.frame(p3) |> 
+  rename(clerk = p3)
+
+p4 <- rep(4,41)
+p4 <- data.frame(p4) |> 
+  rename(clerk= p4)
+
+p5 <- rep(5,41)
+p5 <- data.frame(p5) |> 
+  rename(clerk = p5)
+
+p6 <- rep(6,41)
+p6 <- data.frame(p6) |> 
+  rename(clerk = p6)
+
+p7 <- rep(7,41)
+p7 <- data.frame(p7) |> 
+  rename(clerk = p7)
+
+p8 <- rep(8,41)
+p8 <- data.frame(p8) |> 
+  rename(clerk = p8)
+
+p9 <- rep(9,41)
+p9 <- data.frame(p9) |> 
+  rename(clerk = p9)
+
+clerk <- rbind(p1,p2,p3,p4, p5, p6, p7, p8, p9)
+```
+
+可視化する上で必要なデータフレームを作成する
+```{r}
+#平均
+mean_3 <- data.frame(apply(
+  post_3,
+  2,
+  mean
+))
+
+#信用区間
+conf_3 <- data.frame(t(apply(
+  post_3,
+  2,
+  quantile,
+  probs = c(0.025,0.975)
+)))
+
+#要らん行を消す
+mu_mean_3 <- mean_3[7:375,]
+
+#結合
+conf_3 <- conf_3[7:375,] |> 
+  cbind(X_pred) |> 
+  cbind(clerk) |> 
+  cbind(mu_mean_3) |> 
+  rename(ymin = X2.5.,
+         ymax = X97.5.,
+         product = X_pred,
+         sales = mu_mean_3)
+
+
+
+
+#予測区間
+pred_3 <- data.frame(t(apply(
+  post_3,
+  2,
+  quantile,
+  probs = c(0.005, 0.995)
+)))
+
+#要らん行を消す
+pred_mean_3 <- mean_3[376:744,]
+
+#結合
+pred_3 <- pred_3[376:744,] |> 
+  cbind(clerk) |> 
+  cbind(X_pred) |> 
+  cbind(pred_mean_3) |> 
+  rename(ymin = X0.5.,
+         ymax = X99.5.,
+         product = X_pred,
+         sales = pred_mean_3)
+```
+
+可視化に必要なデータは全部揃ったので，信用区間と予測区間を可視化していく．
+
+まずは信用区間から
+```{r}
+#ベースになる散布図の図示
+ggplot(data = data_3,
+       aes(x = product,
+           y = sales,
+           colour = factor(clerk))) +
+  geom_point()+
+  
+#信用区間の図示
+  geom_line(data = conf_3,
+            aes(x = product,
+                y = sales))+
+  geom_ribbon(data = conf_3,
+              aes(x = product,
+                  ymin = ymin,
+                  ymax = ymax,
+                  fill = factor(clerk)),
+              alpha = 0.5)
+```
+図にすることで，「店員の数が大き時は，製品の数を増やすと売り上げが伸びる」ということが明確にわかる．
+
+
+続いて予測区間も図示する
+```{r}
+#ベースになる散布図の図示
+ggplot(data = data_3,
+       aes(x = product,
+           y = sales,
+           colour = factor(clerk))) +
+  geom_point()+
+  
+#信用区間の図示
+  geom_line(data = pred_3,
+            aes(x = product,
+                y = sales))+
+  geom_ribbon(data = pred_3,
+              aes(x = product,
+                  ymin = ymin,
+                  ymax = ymax,
+                  fill = factor(clerk)),
+              alpha = 0.5)
+```
+モデルに問題はなかったようである．
+
+続いて店員の人数ごとにグラフを描き，それを並べて図示する．
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+
+#ベースになる散布図の図示
+c1 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 1),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "1")
+
+c2 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 2),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "2")
+
+c3 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 3),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "3")
+
+c4 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 4),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "4")
+
+c5 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 5),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "5")
+
+c6 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 6),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "6")
+
+c7 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 7),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "7")
+
+c8 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 8),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "8")
+
+c9 <- ggplot(data = data_3,
+       aes(x = product,
+           y = sales))+
+  geom_line(data = conf_3 |> 
+                filter(clerk == 9),
+            aes(x = product,
+                y = sales),
+                colour = "blue")+
+            ylim(0,500)+
+  labs(title = "9")
+
+plot((c1 | c2 | c3 )/ (c4 | c5 | c6) / (c7 | c8 | c9))
+```
+
+やはりこの図からも，「店員が少ない時に製品数を増やすと逆に売り上げが減る」ということがわかる．
+
+
+
+
+# test
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

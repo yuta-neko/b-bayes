@@ -1,0 +1,451 @@
+---
+title: "応用編 一般化線形混合モデル"
+subtitle: "3章 ランダム係数モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+# データの読み込み
+```{r}
+#分析対象のデータ
+fish <- read.csv("data/4-3-1-fish-num-4.csv")
+head(fish)
+
+#データの要約
+summary(fish)
+```
+
+
+
+
+
+
+# モデルの構造
+
+釣りをした人によって，気温が釣果に与える影響が変化するようなモデルを想定する
+
+$$
+\begin{aligned}
+& r_k \sim \text{Normal}(0, \sigma^2_r)\\
+& \tau_k \sim \text{Normal}(0, \sigma^2_\tau)\\
+& \text{log}(\lambda_i) = \beta_0 + (\beta_1 + \tau_r)x_{i1}+r_k\\
+& y_i \sim \text{Poiss}(\lambda_i)
+\end{aligned}
+$$
+ランダム係数とランダム切片がモデルの中に入っている．
+
+# モデルの推定
+
+続いてリストの作成を行う
+
+
+
+
+
+```{r}
+#文字の置き換え
+fish <- fish |> 
+  mutate(human_id = case_when(
+    human == "A" ~ "1",
+    human == "B" ~ "2",
+    human == "C" ~ "3",
+    human == "D" ~ "4",
+    human == "E" ~ "5",
+    human == "F" ~ "6",
+    human == "G" ~ "7",
+    human == "H" ~ "8",
+    human == "I" ~ "9",
+    human == "J" ~ "10",
+  ))
+
+#予測のためのデータ
+X_pred <- c(10:20)
+N_pred <- length(X_pred)
+
+#グループの数
+M = 10
+
+
+list <- list(
+  N = nrow(fish),
+  M = 10,
+  Y = fish$fish_num,
+  X = fish$temperature,
+  group = fish$human_id,
+  
+  N_pred = N_pred,
+  X_pred = X_pred
+)
+```
+
+
+コンパイルする
+```{r}
+model <- cmdstan_model("stan/4_3.stan")
+
+model$print()
+```
+できたので，mcmを実行する
+```{r}
+#| results: hide
+fit <- model$sample(
+  data = list,
+  seed = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 1000
+)
+```
+結果を表示する
+```{r}
+fit$summary()
+```
+
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(fit$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+収束に問題はなかったようである．念のために可視化しておく
+```{r}
+#| fig-cap: "収束の可視化"
+#| fig-width: 7
+#| fig-height: 5
+
+combo <- mcmc_combo(fit$draws(c("beta_0", "beta_1"))) 
+area <- mcmc_areas( fit$draws(c("beta_0", "beta_1")) )
+
+plot(combo)
+plot(area)
+```
+
+問題なさそうなので，乱数を抽出し，信用区間と予測区間を計算する
+```{r}
+#データフレームに格納
+draws <- fit$draws(format = "df")
+
+#lambdaの抽出
+lambda_pred <- draws |> 
+  spread_draws(lambda_pred[tempureture,human]) |> 
+  mutate(tempureture = tempureture + 9)
+
+#yの抽出
+y_pred <- draws |> 
+  spread_draws(y_pred[tempureture,human]) |> 
+  mutate(tempureture = tempureture + 9)
+
+#95%信用区間の計算
+lambda_conf <- lambda_pred |>
+mean_hdi() |> 
+  mutate(human = case_when(
+    human == "1" ~ "A",
+    human == "2" ~ "B",
+    human == "3" ~ "C",
+    human == "4" ~ "D",
+    human == "5" ~ "E",
+    human == "6" ~ "F",
+    human == "7" ~ "G",
+    human == "8" ~ "H",
+    human == "9" ~ "I",
+    human == "10" ~ "J",
+  ))
+
+#99%予測区間の計算
+y_conf <- y_pred |>
+  dplyr::distinct(tempureture,human,y_pred) |>      #完全に重複した
+mean_hdi(.width = .99) |> 
+  mutate(human = case_when(
+    human == "1" ~ "A",
+    human == "2" ~ "B",
+    human == "3" ~ "C",
+    human == "4" ~ "D",
+    human == "5" ~ "E",
+    human == "6" ~ "F",
+    human == "7" ~ "G",
+    human == "8" ~ "H",
+    human == "9" ~ "I",
+    human == "10" ~ "J",
+  ))
+```
+
+
+抽出と計算もできたので，信用区間と予測区間をプロットしていく
+```{r}
+#| fig-cap: "釣り人別の回帰曲線と信用区間"
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(data = fish,
+       aes(y = fish_num,
+           x = temperature))+
+  geom_point(size = 1)+
+  facet_wrap(~human,ncol = 3)+
+  
+  geom_line(data = lambda_conf,
+            aes(x = tempureture,
+                y = lambda_pred),
+            color = "dodgerblue")+
+  geom_ribbon(data = lambda_conf,
+              aes(ymin = .lower,
+                  ymax = .upper,
+                  y = lambda_pred,
+                  x = tempureture),
+              alpha = 0.3)
+```
+
+信用区間はうまく図示できてよかった．
+```{r}
+#| fig-cap: "釣り人別の回帰曲線と予測区間"
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(data = fish,
+       aes(y = fish_num,
+           x = temperature))+
+  geom_point(size = 1)+
+  facet_wrap(~human,ncol = 3)+
+  
+  geom_line(data = y_conf,
+            aes(x = tempureture,
+                y = y_pred),
+            color = "dodgerblue")+
+  geom_ribbon(data = y_conf,
+              aes(ymin = .lower,
+                  ymax = .upper,
+                  y = y_pred,
+                  x = tempureture),
+              alpha = 0.3)
+```
+予測区間もうまくプロットできてよかった．データの範囲と予測値の範囲がずれているのが問題だった．
+
+
+
+# 交互作用
+
+
+## データの読み込み
+```{r}
+#分析対象のデータ
+fish <- read.csv("data/4-3-1-fish-num-4.csv")
+head(fish)
+
+#データの要約
+summary(fish)
+```
+
+
+
+
+
+
+## モデルの構造
+
+釣りをした人によって，気温が釣果に与える影響が変化するようなモデルを想定する
+
+$$
+\begin{aligned}
+& r_k \sim \text{Normal}(0, \sigma^2_r)\\
+& \tau_k \sim \text{Normal}(0, \sigma^2_\tau)\\
+& \text{log}(\lambda_i) = \beta_0 + (\beta_1 + \tau_r)x_{i1}+r_k\\
+& y_i \sim \text{Poiss}(\lambda_i)
+\end{aligned}
+$$
+ランダム係数とランダム切片がモデルの中に入っている．
+
+いったん，普通の交互作用を見てみる
+
+## モデルの推定
+
+続いてリストの作成を行う
+
+
+
+
+
+```{r}
+#デザイン行列
+mat0 <- model.matrix(formula(fish_num~1),fish)
+mat1 <- model.matrix(formula(fish_num~0+human),fish)
+mat2 <- model.matrix(formula(fish_num~0+temperature),fish)
+mat3 <- model.matrix(formula(fish_num~0+human:temperature),fish)
+mat <- cbind(mat0,mat1,mat2,mat3)
+
+#予測のためのデータ
+
+T_pred <- rep(10:20 ,each = 10)
+H_pred <- rep(LETTERS[1:10],11)
+a <- rep(1,110)
+X_pred <- cbind(H_pred,T_pred)
+mat1 <- model.matrix(formula(~0+H_pred))
+mat2 <- model.matrix(formula(~0+T_pred))
+mat3 <- model.matrix(formula(~0+H_pred:T_pred))
+X_pred <- cbind(a,mat1,mat2,mat3)
+
+
+
+
+list <- list(
+  N = nrow(fish),
+  Y = fish$fish_num,
+  X = mat,
+  
+  X_pred = X_pred
+)
+```
+
+
+コンパイルする
+```{r}
+model <- cmdstan_model("stan/4_3_2.stan")
+
+model$print()
+```
+できたので，mcmを実行する
+```{r}
+#| results: hide
+fit <- model$sample(
+  data = list,
+  seed = 1,
+  chains = 4,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 1000
+)
+```
+結果を表示する
+```{r}
+fit$summary()
+```
+
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(fit$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+収束に問題はなかったようである．念のために可視化しておく
+```{r}
+#| fig-cap: "収束の可視化"
+#| fig-width: 7
+#| fig-height: 5
+
+combo <- mcmc_combo(fit$draws(c("beta[1]","beta[12]"))) 
+area <- mcmc_areas( fit$draws(c("beta[1]","beta[12]")))
+
+plot(combo)
+plot(area)
+```
+
+問題なさそうなので，乱数を抽出し，信用区間と予測区間を計算する
+```{r}
+#データフレームに格納
+draws <- fit$draws(format = "df")
+
+#lambdaの抽出
+for(i in 1:110){
+  lambda_pred <- draws |> 
+  spread_draws(lamb_pred[i]) 
+}
+
+#95%信用区間の計算
+lambda_conf <- lambda_pred |>
+  mean_hdi() |> 
+  cbind(T_pred,H_pred) |> 
+  rename(human = H_pred)
+
+```
+
+
+抽出と計算もできたので，信用区間と予測区間をプロットしていく
+```{r}
+#| fig-cap: "釣り人別の回帰曲線と信用区間"
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(data = fish,
+       aes(y = fish_num,
+           x = temperature))+
+  geom_point(size = 1)+
+  facet_wrap(~human,ncol = 3)+
+  
+  geom_smooth(data = lambda_conf,
+            aes(x = T_pred,
+                y = lamb_pred),
+            color = "dodgerblue")+
+  geom_ribbon(data = lambda_conf,
+              aes(ymin = .lower,
+                  ymax = .upper,
+                  y = lamb_pred,
+                  x = T_pred),
+              alpha = 0.3)
+```
+
+
+# test
+
+
+
+
+

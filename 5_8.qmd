@@ -1,0 +1,182 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "8章 動的一般化線形モデル:二項分布を仮定した例"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes,
+               ggfortify,
+               gridExtra,
+               KFAS)
+source("func/plotSSM.R")
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+
+
+
+
+
+# データの読み込み
+
+```{r}
+data("boat")
+
+boat
+```
+欠損値が目立つ．補完しつつ，分析も行う
+
+# stanファイルの実装
+
+コンパイルしてmcmcの実行もする
+
+```{r}
+model_1 <- cmdstan_model("stan/5_8_1.stan")
+
+model_1$print()
+```
+
+- 欠損値を除く
+```{r}
+boat_omit_NA <- na.omit(as.numeric(boat))
+```
+
+
+- データの準備
+```{r}
+data_list <- list(
+  T       = length(boat),
+  len_obs = length(boat_omit_NA),
+  y       = boat_omit_NA,
+  obs_no  = which(!is.na(boat))
+)
+```
+
+- モデルの推定
+```{r}
+fit_1 <- model_1$sample(
+  data = data_list,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+- 推定結果
+```{r}
+fit_1$summary(c("s_w"))
+```
+
+# 推定された状態の図示
+
+ケンブリッジ大学の勝率の推移を図示する．
+
+- 時間ラベルを作る
+
+データに日付データがないので
+```{r}
+years <- seq(from = as.POSIXct("1829-01-01"),
+             by   = "1 year",
+             len  = length(boat))
+
+head(years, n = 3)
+```
+
+
+- 図示
+
+```{r}
+#| fig-cap: "ケンブリッジ大学の勝率の推移"
+sample <- fit_1$draws("probs")
+
+plotSSM(sample = sample,
+        time_vec = years,
+        obs_vec = as.numeric(boat),
+        graph_title = "ケンブリッジ大学の勝率の推移",
+        y_label = "勝率")
+```
+ぜ
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

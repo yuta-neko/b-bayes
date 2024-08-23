@@ -1,0 +1,326 @@
+---
+title: "実践編"
+subtitle: "8章 ポアソン回帰モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               brms)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+
+
+
+
+# モデルの構造
+
+応答変数が0以上の整数の場合，確率分布を正規分布ではなくポアソン分布にする．ポアソン分布のパラメータは強度$\lambda$のみである．リンク関数には対数関数が用いられる．
+
+魚の釣獲尾数のモデル化を試みる．強度$\lambda$は気温と天候によって変化すると想定する．が，雨の日は釣りができなかった．
+
+モデルは以下のようになる
+
+$$
+\begin{aligned}   
+  & \mbox{log}(\lambda_i) = \beta_0+\beta_1 x_{i1} + \beta_2 x_{i2} \\
+  & y_i \sim \mbox{Poiss}(\lambda_i)
+\end{aligned}
+$$
+対数関数を逆関数である自然対数の指数関数で置き換える．こうすることでポアソン分布の強度が負の値を取らなくなる
+$$
+\begin{aligned}   
+  & \lambda_i = \beta_0+\beta_1 x_{i1} + \beta_2 x_{i2} \\
+  & y_i \sim \mbox{Poiss}(\mbox{exp}(\lambda_i))
+\end{aligned}
+$$
+
+# データの読み込みと可視化
+
+```{r}
+#分析対処のデータ
+fish <- read.csv("data/3-8-1-fish-num-1.csv")
+head(fish, 3)
+
+#データの要約
+summary(fish)
+```
+
+```{r}
+#| fig-cap: "釣獲尾数と天気・気温の関係"
+ggplot(data = fish,
+       aes(x = temperature,
+           y = fish_num)) +
+  geom_point(aes(color = weather)) + 
+  labs(title = "釣獲尾数と気温・天気の関係")
+```
+気温の上昇に伴い，釣獲尾数の平均と分散が大きくなっていることがわかる．この特徴はポアソン分布のそれと一致する．
+
+# 回帰モデルの推定
+
+まずはリスト作る
+
+```{r}
+#YとXを定義し，データフレームに収める
+
+data1 <- data.frame(Y = fish$fish_num,
+                    X = fish$temperature)
+```
+
+
+```{r}
+#デザイン行列を作ることで，文字を数列に変換する
+#Dを定義し，データフレームに収める
+
+formula <- formula(~weather)
+design_mat <- model.matrix(formula, fish)
+
+design_mat <- tibble(design_mat)
+data2 <- data.frame(D = design_mat$design_mat[,"weathersunny"])
+```
+
+```{r}
+#2つのデータフレームを結合するここで，tidyなデータが入手できた
+
+fish_tidy <- cbind(data1, data2)
+```
+
+```{r}
+#予測分布のためのデータも用意しておく
+
+#X
+X_pred <- c(0:30)
+```
+
+データをリストにまとめる
+```{r}
+fish_list <- list(
+  
+  #サンプルサイズ
+  N = nrow(fish_tidy),
+  
+  X = fish_tidy$X,
+  Y = fish_tidy$Y,
+  D = fish_tidy$D,
+  
+  #信頼区間を出すため
+  N_pred = length(X_pred),
+  X_pred = X_pred
+)
+```
+
+```{r}
+#| results: hide
+mcmc_result_8 <- stan(
+  file = "stan/3_8_1.stan",
+  data = fish_list,
+  seed = 1
+)
+```
+
+```{r}
+#mcmcサンプルの抽出
+lamb1 <- rstan::extract(mcmc_result_8)$lamb_pred_1
+lamb2 <- rstan::extract(mcmc_result_8)$lamb_pred_2
+y1 <- rstan::extract(mcmc_result_8)$Y_pred_1
+y2 <- rstan::extract(mcmc_result_8)$Y_pred_2
+```
+
+
+信頼区間用のデータセットを用意する．
+```{r}
+#曇りの時の信用区間の乱数をデータフレームにまとめる
+lamb1 <- data.frame(
+  t(
+    apply(
+      lamb1, 
+      2, 
+      quantile, 
+      probs = c(0.025, 0.5,0.975))))
+
+lamb1 <- lamb1 |> 
+  rename(fish_num = X50.) |> 　#yの名前を変えないとバグる
+  cbind(X_pred)　　            #x軸の追加
+
+#晴れの時の信用区間の乱数をデータフレームにまとめる
+lamb2 <- data.frame(
+  t(
+  apply(
+    lamb2, 
+    2, 
+    quantile, 
+    probs = c(0.025, 0.5,0.975))))
+
+lamb2 <- lamb2 |> 
+  rename(fish_num = X50.) |> 　　 #yの名前変えないとバグる
+  cbind(X_pred)　　　#x軸の追加
+```
+
+予測区間用のデータセットを用意する．
+
+```{r}
+#曇りの時の予測区間の乱数をデータフレームにまとめる
+y1 <- data.frame(
+  t(
+    apply(
+      y1, 
+      2, 
+      quantile, 
+      probs = c(0.005, 0.5,0.995))))
+
+y1 <- y1 |> 
+  rename(fish_num = X50.) |> 　#yの名前を変えないとバグる
+  cbind(X_pred)　　            #x軸の追加
+
+#晴れの時の予測区間の乱数をデータフレームにまとめる
+y2 <- data.frame(
+  t(
+    apply(y2,
+          2,
+          quantile,
+          probs = c(0.005, 0.5,0.995))))
+
+y2 <- y2 |> 
+  rename(fish_num = X50.) |> 　　 #yの名前変えないとバグる
+  cbind(X_pred)　　　             #x軸の追加
+```
+
+データが揃ったので信頼区間を図示する
+```{r}
+#| fig-cap: "ポアソン回帰曲線と信用区間"
+#回帰曲線に95%信用区間を重ねる
+
+ggplot(data = fish,
+           aes(x = temperature,
+               y = fish_num))+
+  geom_point(aes(colour = weather))+
+  
+  #曇りの回帰曲線と信用区間
+  geom_line(data = lamb1,
+           aes(y = fish_num,
+               x = X_pred,
+               colour = "cloudy")) +
+  
+  geom_ribbon(data = lamb1,
+              aes(ymax = X97.5.,
+                  ymin = X2.5.,
+                  x = X_pred,
+                  fill = "cloudy"),
+              alpha = 0.2) +
+  
+  #晴れの回帰直線と信用区間
+  geom_line(data = lamb2,
+           aes(y = fish_num,
+               x = X_pred,
+               colour = "sunny")) +
+  
+  geom_ribbon(data = lamb2,
+              aes(ymax = X97.5.,
+                  ymin = X2.5.,
+                  x = X_pred,
+                  fill = "sunny"),
+              alpha = 0.2)
+  
+```
+
+```{r}
+#| fig-cap: "ポアソン回帰曲線と予測区間"
+#回帰直線に予測区間を重ねて図示する
+
+ggplot(data = fish,
+           aes(x = temperature,
+               y = fish_num))+
+  geom_point(aes(colour = weather))+
+  
+  #曇りの回帰曲線と予測区間
+  geom_line(data = y1,
+           aes(y = fish_num,
+               x = X_pred,
+               colour = "cloudy")) +
+  
+  geom_ribbon(data = y1,
+              aes(ymax = X99.5.,
+                  ymin = X0.5.,
+                  x = X_pred,
+                  fill = "cloudy"),
+              alpha = 0.2) +
+  
+  #晴れの回帰直線と予測区間
+  geom_line(data = y2,
+           aes(y = fish_num,
+               x = X_pred,
+               colour = "sunny")) +
+  
+  geom_ribbon(data = y2,
+              aes(ymax = X99.5.,
+                  ymin = X0.5.,
+                  x = X_pred,
+                  fill = "sunny"),
+              alpha = 0.2)
+  
+```
+
+
+
+# test
+
+

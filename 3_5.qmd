@@ -1,0 +1,306 @@
+---
+title: "実践編"
+subtitle: "5章 brmsの使い方"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備
+
+```{r global_option}
+#| include: false
+#| message: false
+
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               brms)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+
+
+
+
+
+
+# brmsとは
+
+stanを使うことなくベイズ統計モデリングができるパッケージ．
+
+7/2
+brmsがインストールできないwhy?
+
+7/4
+brmsがインストールできた．CRANの設定をglobalに変更したらいけた
+
+p.s.
+rgamerもインストールできた!
+
+
+
+# 分析の準備
+
+```{r}
+beer_data <- read.csv("data/3-2-1-beer-sales-2.csv")
+sample_size <- nrow(beer_data)
+beer_list <- list(sales =beer_data$sales,
+                  temperature = beer_data$temperature,
+                  N = sample_size)
+```
+
+# 単回帰モデルの推定
+```{r}
+#| results: hide
+#brmsの代わりに自力でがんばる
+mcmc_result <- stan(
+  file = "stan/3_5_1.stan",
+  data = beer_list,
+  seed = 1,
+)
+```
+```{r}
+print(mcmc_result, probs = c(0.025, 0.975))
+```
+いい感じの結果が出た．これでええやん
+
+mcmcサンプルが欲しい
+```{r}
+mcmc_sample <- rstan::extract(mcmc_result,
+                              permuted = FALSE)
+```
+
+トレースプロットをまとめて表示する
+```{r}
+#| fig-cap: "stanでbrmsの再現"
+mcmc_combo(mcmc_sample,
+           pars = c("intercept", "beta", "sigma"))
+```
+
+
+# 事前分布の変更
+
+できた
+
+# 事後分布の可視化
+
+```{r}
+#| fig-cap: "係数の信頼区間を再現"
+mcmc_intervals(mcmc_sample,
+               regex_pars = c("intercept","beta"),
+               prob = 0.8,
+               prob_outer = 0.95)
+```
+
+
+# 予測
+
+気温が20の時の予測欲しい
+
+まずはmcmcサンプルを取り出していたので，中身を確認しよう
+```{r}
+head(mcmc_sample, n = 2)
+```
+結果を保存しておく
+```{r}
+mcmc_intercept <- mcmc_sample[,,"intercept"] 
+mcmc_beta <- mcmc_sample[,,"beta"]
+mcmc_sigma <- mcmc_sample[,,"sigma"]
+```
+
+気温が20のときのYの予測値
+```{r}
+saigen <- mcmc_intercept + mcmc_beta * 20
+mean(saigen)
+quantile(saigen, probs =c(0.025, 0.975))
+```
+
+予測分布のmcmcサンプルが欲しい
+```{r}
+#平均がsaigen
+#標準偏差はmcmc_sigma
+saigen_predict <- do.call(rnorm,
+                          c(4000,
+                            list(mean = saigen,
+                                 sd = mcmc_sigma)))
+```
+saigen_pedictの要約統計量を見る
+```{r}
+mean(saigen_predict)
+quantile(saigen_predict, prob = c(0.025, 0.975))
+```
+
+# 回帰直線の図示
+
+- まずはbrmsでコードを記述する
+```{r}
+#| results: hide
+simple_lm_brms <- brm(#modelの構造を指定
+  　　　　　　　　　　formula = sales ~ temperature,
+  　　　　　　　　　　
+  　　　　　　　　　　#正規分布を使う
+                      family = gaussian(link = "identity"),
+  　　　　　　　　　　
+  　　　　　　　　　　#データの指定
+                      data = beer_data,
+  　　　　　　　　　　
+  　　　　　　　　　　#シード値
+                      seed = 1)
+simple_lm_brms
+```
+
+- MCMCサンプルは以下のコマンドでゲットできる
+```{r}
+#| results: hide
+as.mcmc(simple_lm_brms,
+        combine_chains = TRUE)
+```
+
+- 事後分布を可視化しよう
+```{r}
+#| fig-cap: "自力で事後分布の再現"
+plot(simple_lm_brms)
+```
+
+- 事前分布の変更もいける
+
+事前分布がどうなっているのか確認しよう
+```{r}
+prior_summary(simple_lm_brms)
+```
+
+- 裾が広い一様分布を無情報事前分布に指定する
+```{r}
+simple_lm_brms_3 <- brm(
+  formula = sales ~ temperature,
+  family = gaussian(),
+  data = beer_data,
+  seed = 1,
+  #ここで任意の事前分布を指定できる
+  #""にするとデフォルトの指定になる
+  #set_prior("normal(0,100000)", class = "b", coef = "temperature")
+  prior = c(set_prior("", class = "Intercept"),
+           set_prior("", class = "sigma"))
+)
+```
+
+- get_prior関数で，特定のモデルの場合に適応される事前分布がわかる
+```{r}
+get_prior(
+  formula = sales ~ temperature,
+  family = gaussian(),
+  data = beer_data
+)
+```
+
+- stanコードの抽出もできる
+```{r}
+stancode(simple_lm_brms_3)
+```
+
+- stanに渡すコードの抽出
+```{r}
+#| results: hide
+standata(simple_lm_brms_3)
+```
+- brmsで事後分布の可視化
+```{r}
+#| fig-cap: "brmsで事後分布の可視化" 
+stanplot(simple_lm_brms,
+         type = "intervals",
+         pars = "^b_",
+         prob = 0.8,
+         prob_outer = 0.95)
+```
+
+- brmsでの予測
+```{r}
+#予測のための説明変数
+new_data <- data.frame(temperature = 20)
+```
+```{r}
+#fitted関数でモデルの予測値を回帰直線の信頼区間とセットで出してくれる
+fitted(simple_lm_brms,new_data)
+```
+```{r}
+#predict関数でモデルの予測値を予測区間とセットで出してくれる
+predict(simple_lm_brms, new_data)
+```
+
+```{r}
+#| fig-cap: "回帰直線の95%確信区間付きのグラフ"
+#回帰直線の95％確信区間付きのグラフ
+eff <- conditional_effects(simple_lm_brms)
+plot(eff,points = TRUE)
+```
+```{r}
+#| fig-cap: "予測区間付きのグラフ"
+#95％予測区間付きのグラフ
+eff <- conditional_effects(simple_lm_brms,
+                           method = "predict")
+plot(eff,points = TRUE)
+```
+推定されたモデルから得られた予測分布と実際のデータを比較することで，モデルの評価が可能．予測区間からデータが多くはみ出している場合，モデルの構造を修正するべし．
+
+特定の説明変数にフォーカスしてグラフを図示する必要も出てくる．effectsという引数を追加する
+```{r}
+#| fig-cap: "特定の変数のみ"
+conditional_effects(simple_lm_brms,
+                    effects = "temperature")
+#複数の説明変数が応答変数にもたらす影響を可視化する場合は
+#effects = "x1,x2"
+```
+
+
+# test
+
+

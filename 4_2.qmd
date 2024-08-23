@@ -1,0 +1,348 @@
+---
+title: "応用編 一般化線形混合モデル"
+subtitle: "2章 ランダム切片モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes)
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+# データの読み込み
+
+湖で1時間釣りをした時の釣果尾数，気温，天気，調査した人のidが記録されたデータを読み込む
+```{r}
+#データの読み込み
+fish_1 <- read.csv("data/4-2-1-fish-num-3.csv")
+head(fish_1)
+
+#データの要約
+summary(fish_1)
+```
+
+
+# ランダム切片モデルの構造
+
+魚の釣果尾数のモデル化を試みる．釣果尾数はポアソン分布に従い，ポアソン分布の強度$\lambda$が天気と気温，釣り人の能力によって変化すると仮定する
+
+$$
+\begin{aligned}
+& r_k \sim \text{Normal}(0, \sigma^2_k)\\
+& \text{log}(\lambda) = \beta_0 + \beta_1 x_{i1} + \beta_2 x_{i2} + r_k\\
+& y_i \sim \text{Poiss}(\lambda_i)
+\end{aligned}
+$$
+ただし
+$$
+\begin{aligned}
+& k \in \{A,B,C,D,\dots,I,J\}\\
+& i \in \mathbb{N}
+\end{aligned}
+$$
+である．さっきはrは100個であったが，今回は10種類である．
+
+# ランダム効果の使い所
+
+- 固定効果：天気・気温
+- ランダム効果：釣りをした人のID
+
+ランダム効果は，疑似反復を防ぐ目的でも使われる．
+
+# モデルの推定
+
+まずはリストを作る
+```{r}
+#デザイン行列
+mat_1 <- model.matrix(formula(~weather), fish_1)
+mat_1 <- data.frame(mat_1)
+
+#文字の置き換え
+fish_1 <- fish_1 |> 
+  mutate(human_id = case_when(
+    human == "A" ~ "1",
+    human == "B" ~ "2",
+    human == "C" ~ "3",
+    human == "D" ~ "4",
+    human == "E" ~ "5",
+    human == "F" ~ "6",
+    human == "G" ~ "7",
+    human == "H" ~ "8",
+    human == "I" ~ "9",
+    human == "J" ~ "10",
+  ))
+
+#予測のためのデータ
+X_pred <- c(0:30)
+D_pred <- c(0:1)
+
+#リスト作成
+list_1 <- list(
+  N = nrow(fish_1),
+  Y = fish_1$fish_num,
+  X_1 = mat_1$weathersunny,
+  X_2 = fish_1$temperature,
+  group = fish_1$human_id,
+  
+  N_pred = length(X_pred),
+  X_pred = X_pred,
+  D_pred = D_pred
+)
+```
+
+
+コンパイルする
+```{r}
+model_1 <- cmdstan_model("stan/4_2_1.stan")
+
+model_1$print()
+```
+コンパイルができたので，MCMCを実行する
+```{r}
+#| results: hide
+fit_1 <- model_1$sample(
+  data = list_1,
+  seed = 1,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+
+```{r}
+fit_1$summary()
+```
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(fit_1$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+
+収束に問題はなかったようである．念のために可視化しておく
+```{r}
+#| fig-cap: "収束の可視化"
+#| fig-width: 7
+#| fig-height: 5
+
+combo <- mcmc_combo(fit_1$draws(c("beta_0", "beta_1", "beta_2"))) 
+area <- mcmc_areas( fit_1$draws(c("beta_0", "beta_1", "beta_2")) )
+
+plot(combo)
+plot(area)
+```
+
+問題なさそうである．乱数を抽出し，信用区間と予測区間を計算する
+```{r}
+#データフレームに格納
+draws <- fit_1$draws(format = "df")
+
+#lambdaの抽出
+lambda_pred <- draws |>
+spread_draws(l_pred[tempureture,human,weather])
+
+#yの抽出
+y_pred <- draws |>
+spread_draws(y_pred[tempureture,human,weather])
+
+#95%信用区間の計算
+lambda_conf <- lambda_pred |>
+mean_hdi() |> 
+  mutate(weather = case_when(
+    weather == "1" ~ "cloudy",
+    weather == "2" ~ "sunny")) |> 
+  mutate(human = case_when(
+    human == "1" ~ "A",
+    human == "2" ~ "B",
+    human == "3" ~ "C",
+    human == "4" ~ "D",
+    human == "5" ~ "E",
+    human == "6" ~ "F",
+    human == "7" ~ "G",
+    human == "8" ~ "H",
+    human == "9" ~ "I",
+    human == "10" ~ "J",
+  ))
+
+
+#99%予測区間の計算
+y_conf <- y_pred |>
+  dplyr::distinct(tempureture,human,weather,y_pred) |>      #完全に重複した
+mean_hdi(.width = .99) |>                                               #データの削除
+  mutate(weather = case_when(
+    weather == "1" ~ "cloudy",
+    weather == "2" ~ "sunny")) |> 
+  
+
+  mutate(human = case_when(
+    human == "1" ~ "A",
+    human == "2" ~ "B",
+    human == "3" ~ "C",
+    human == "4" ~ "D",
+    human == "5" ~ "E",
+    human == "6" ~ "F",
+    human == "7" ~ "G",
+    human == "8" ~ "H",
+    human == "9" ~ "I",
+    human == "10" ~ "J",
+  ))
+
+```
+
+抽出と計算もできたので，信用区間と予測区間をプロットしていく
+```{r}
+#| fig-cap: "釣り人別の回帰曲線と信用区間"
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(data = fish_1,
+       aes(y = fish_num,
+           x = temperature,
+           group = weather))+
+  geom_point(aes(colour = weather))+
+  facet_wrap(~human,ncol = 3)+
+  
+  geom_line(data = lambda_conf,
+            aes(x = tempureture,
+                y = l_pred,
+                colour = weather))+
+  geom_ribbon(data = lambda_conf,
+              aes(ymin = .lower,
+                  ymax = .upper,
+                  y = l_pred,
+                  x = tempureture,
+                  fill = weather),
+              alpha = 0.5)
+```
+
+信用区間はうまく図示できてよかった．
+```{r}
+#| fig-cap: "釣り人別の回帰曲線と予測区間"
+#| fig-width: 7
+#| fig-height: 5
+
+ggplot(data = fish_1,
+       aes(y = fish_num,
+           x = temperature,
+           group = weather))+
+  geom_point(aes(colour = weather))+
+  facet_wrap(~human,ncol = 3)+
+  
+  geom_line(data = y_conf,
+            aes(x = tempureture,
+                y = y_pred,
+                colour = weather))+
+  geom_ribbon(data = y_conf,
+              aes(ymin = .lower,
+                  ymax = .upper,
+                  y = y_pred,
+                  x = tempureture,
+                  fill = weather),
+              alpha = 0.5)
+```
+予測区間も問題ない．重複した結果が多いとうまくプロットできないようである．
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# test
+
+
+
+  mutate(human = case_when(
+    human == "1" ~ "A",
+    human == "2" ~ "B",
+    human == "3" ~ "C",
+    human == "4" ~ "D",
+    human == "5" ~ "E",
+    human == "6" ~ "F",
+    human == "7" ~ "G",
+    human == "8" ~ "H",
+    human == "9" ~ "I",
+    human == "10" ~ "J",
+  ))
+
+
+

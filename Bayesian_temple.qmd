@@ -1,0 +1,136 @@
+---
+title: "編"
+subtitle: "サブタイトル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes,
+               ggfortify,
+               gridExtra)
+source("func/plotSSM.R")
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+\newpage
+
+以下のコードで特定の
+
+
+以下のコードがとても便利
+
+```
+draws <- fit$draws(format = "df")
+
+test1 <- draws |> 
+  spread_draws(Y_pred_1[a])
+
+test1 <- test1 |> 
+  median_hdi()
+```
+
+|関数|算出する値|
+|--|--|
+|mean_qi|平均値および分位点区間|
+|median_qi|中央値および分位点区間|
+|mode_qi|最頻値および分位点区間|
+|mean_hdi|平均値およびHDI (多峰の場合は複数の区間を算出)|
+|median_hdi|中央値およびHDI (多峰の場合は複数の区間を算出)|
+|mode_hdi|最頻値およびHDI (多峰の場合は複数の区間を算出)|
+|mean_hdci|平均値およびHDI (多峰の場合でも単一の区間のみ算出)|
+|median_hdci|中央値およびHDI (多峰の場合でも単一の区間のみ算出)|
+|mode_hdci|最頻値値およびHDI (多峰の場合でも単一の区間のみ算出|
+
+
+
+\newpage
+
+:::{.callout-note}
+## Rはみんなの友達!
+
+末永くよろしくね!
+:::
+
+:::{.callout-warning}
+## Rはみんなの友達!
+
+末永くよろしくね!
+:::
+
+:::{.callout-important}
+## Rはみんなの友達!
+
+末永くよろしくね!
+:::
+
+:::{.callout-tip}
+## Rはみんなの友達!
+
+末永くよろしくね!
+:::
+
+:::{.callout-caution}
+## Rはみんなの友達!
+
+末永くよろしくね!
+:::
+

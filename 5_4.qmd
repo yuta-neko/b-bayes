@@ -1,0 +1,423 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "4章 時変係数モデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes,
+               ggfortify,
+               gridExtra)
+
+source("func/plotSSM.R",
+       encoding = "utf-8")
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+# データの読み込み
+
+架空のデータを読み込んだ上で，日付を変更する．今回は売り上げが，宣伝担当の人数によって変化することを想定したモデルを考える．
+```{r}
+#データの読み込み
+sales_df_2 <- read.csv("data/5-4-1-sales-ts-2.csv")
+sales_df_2$date <- as.POSIXct(sales_df_2$date)
+head(sales_df_2,n = 3)
+```
+salesとpublisityの時系列プロットを描く
+```{r}
+#図示
+autoplot(ts(sales_df_2[,-1]))
+```
+宣伝担当の人数が，初期は0人が多かったが25日を超えたあたりで増加傾向に転じ，それに応じてsalesも増加しているように見えるが，その関係は明瞭でない．
+
+# 通常の単回帰モデルの適用
+
+特徴を掴むために一旦単回帰．これは本来不適切である．
+
+- 売り上げと人数の関係をプロットする
+
+```{r}
+ggplot(data = sales_df_2,
+       aes(x = publicity,
+           y = sales))+
+ geom_point() + 
+  labs(title = "売上と人数の関係")
+```
+- stanファイルを作成し，コンパイルする
+
+```{r}
+model_1 <- cmdstan_model("stan/5_4_1.stan")
+
+model_1$print()
+```
+
+
+データをリストにまとめてmcmcを実行する
+
+```{r}
+#リストの作成
+data_list_1 <- list(
+  N = nrow(sales_df_2),
+  y = sales_df_2$sales,
+  x = sales_df_2$publicity,
+  x_pred = c(0:8)
+)
+```
+mcmcを実行する
+```{r}
+#mcmcの実行
+result_1 <- model_1$sample(
+  data = data_list_1,
+  seed = 1,
+  chains = 4,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 1000)
+
+#結果の確認
+result_1$summary()
+```
+
+可視化する
+```{r}
+#サンプルの抽出
+drws_1 <- result_1$draws(format = "df")
+
+mu_pred <- drws_1 |> 
+  spread_draws(mu_pred[id])
+
+mu_conf <- mu_pred |> 
+  mean_hdi() |> 
+  mutate(id = id - 1)
+
+colnames(mu_conf) <- c("publicity","sales","min","max")
+
+
+
+#可視化
+ggplot(data = sales_df_2,
+       aes(x = publicity,
+           y = sales))+
+ geom_point() + 
+  labs(title = "売上と人数の関係")+
+  geom_line(data = mu_conf,
+            aes(y = sales,
+                x = publicity))+
+  geom_ribbon(data = mu_conf,
+              aes(ymin = min,
+                  ymax = max),
+              alpha = 0.2)
+```
+# 時点を分けた2つの回帰モデルの適用
+
+データを50日で区切る
+
+```{r}
+sales_df_2_head <- head(sales_df_2, n = 50)
+sales_df_2_tail <- tail(sales_df_2, n = 50)
+```
+
+
+- stanファイルを作成し，コンパイルする
+
+```{r}
+model_1_head <- cmdstan_model("stan/5_4_1_head.stan")
+model_1_tail <- cmdstan_model("stan/5_4_1_tail.stan")
+
+model_1_head$print()
+model_1_tail$print()
+```
+
+
+データをリストにまとめてmcmcを実行する
+
+```{r}
+#リストの作成
+data_list_1_head <- list(
+  N = nrow(sales_df_2_head),
+  y = sales_df_2_head$sales,
+  x = sales_df_2_head$publicity,
+  x_pred = c(0:8)
+)
+
+data_list_1_tail <- list(
+  N = nrow(sales_df_2_tail),
+  y = sales_df_2_tail$sales,
+  x = sales_df_2_tail$publicity,
+  x_pred = c(0:8)
+)
+```
+mcmcを実行する
+```{r}
+#mcmcの実行
+result_1_head <- model_1_head$sample(
+  data = data_list_1_head,
+  seed = 1,
+  chains = 4,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 1000)
+
+result_1_tail <- model_1_tail$sample(
+  data = data_list_1_tail,
+  seed = 1,
+  chains = 4,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 1000)
+
+#結果の確認
+result_1_head$summary(c("beta_0","beta_1"))
+
+result_1_tail$summary(c("beta_0","beta_1"))
+```
+
+可視化する
+```{r}
+#サンプルの抽出
+drws_1_head <- result_1_head$draws(format = "df")
+drws_1_tail<- result_1_tail$draws(format = "df")
+
+mu_pred_h <- drws_1_head |> 
+  spread_draws(mu_pred[id])
+mu_pred_t <- drws_1_tail |> 
+  spread_draws(mu_pred[id])
+
+mu_conf_h <- mu_pred_h |> 
+  mean_hdi() |> 
+  mutate(id = id - 1)
+mu_conf_t <- mu_pred_t |> 
+  mean_hdi() |> 
+  mutate(id = id - 1)
+
+colnames(mu_conf_h) <- c("publicity","sales","min","max")
+colnames(mu_conf_t) <- c("publicity","sales","min","max")
+
+
+
+#可視化
+ggplot(data = sales_df_2_head,
+       aes(x = publicity,
+           y = sales))+
+ geom_point() + 
+  labs(title = "売上と人数の関係")+
+  geom_line(data = mu_conf_h,
+            aes(y = sales,
+                x = publicity))+
+  geom_ribbon(data = mu_conf_h,
+              aes(ymin = min,
+                  ymax = max),
+              alpha = 0.2)
+
+ggplot(data = sales_df_2_tail,
+       aes(x = publicity,
+           y = sales))+
+ geom_point() + 
+  labs(title = "売上と人数の関係")+
+  geom_line(data = mu_conf_t,
+            aes(y = sales,
+                x = publicity))+
+  geom_ribbon(data = mu_conf_t,
+              aes(ymin = min,
+                  ymax = max),
+              alpha = 0.2)
+```
+
+
+
+前半と後半で推定値が違う．にも関わらず全期間で回帰分析するのはよくない．
+
+
+# 時系列係数モデルの構造
+
+時系列モデルの構造を数式で表現する．最も簡単な形は，説明変数の回帰係数がランダムウォークに従って変化するものである．「ランダムウォークする切片」を持つローカルレベルモデルに「ランダムウォークする回帰係数」を持つ説明変数を加えたモデルは以下のように表現される
+
+- 状態方程式
+$$
+\begin{aligned}
+\mu_t &= \mu_{t-1} + w_t,&w_t \sim \text{Normal}(0, \sigma^2_w)\\
+\beta_t &= \beta_{t-1} + \tau_t,&\tau_t \sim \text{Normal}(0, \sigma^2_\tau)\\
+\alpha_t &= \mu_t + \beta_t \cdot ex_t 
+\end{aligned}
+$$
+- 観測方程式
+$$
+y_t = \alpha_t + v_t,\ \ \ \ \ \ \ v_t \sim \text{Normal}(0,\sigma^2_v)
+$$
+# 時変係数モデルのためのstanファイルの実装
+
+記述してコンパイルまでする
+```{r}
+model_2 <- cmdstan_model("stan/5_4_2.stan")
+
+model_2$print()
+```
+
+
+# mcmcの実行
+
+```{r}
+#データの準備
+data_list_2 <- list(
+  y = sales_df_2$sales,
+  ex = sales_df_2$publicity,
+  T = nrow(sales_df_2)
+)
+
+#モデルの推定
+fit <- model_2$sample(
+  data = data_list_2,
+  seed = 1,
+  chains = 6,
+  refresh = 5000,
+  iter_warmup = 5000,
+  iter_sampling = 5000
+)
+```
+
+結果の確認
+```{r}
+print(fit,c("s_w", "s_t", "s_v", "b[100]"))
+```
+
+収束を確認する
+```{r}
+all(fit$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+
+問題なし．可視化してみる
+```{r}
+combo <- mcmc_combo(fit$draws(c("s_w", "s_t", "s_v", "b[100]")))
+area <- mcmc_areas(fit$draws(c("s_w", "s_t", "s_v", "b[100]")))
+plot(combo)
+plot(area)
+```
+
+# 推定された状態の図示
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+sample_all <- fit$draws("alpha")
+sample_mu <- fit$draws("mu")
+sample_b <- fit$draws("b")
+
+p_all <- plotSSM(sample = sample_all,
+                 time_vec = sales_df_2$date,
+                 obs_vec = sales_df_2$sales,
+                 graph_title = "推定結果:状態",
+                 y_label = "sales")
+
+p_mu <- plotSSM(sample = sample_mu,
+                 time_vec = sales_df_2$date,
+                 obs_vec = sales_df_2$sales,
+                 graph_title = "推定結果:集客効果を除いた",
+                 y_label = "sales")
+
+p_b <- plotSSM(sample = sample_b,
+                 time_vec = sales_df_2$date,
+                 graph_title = "推定結果:集客効果の遷移",
+                 y_label = "coef")
+
+grid.arrange(p_all, p_mu, p_b)
+```
+状態空間モデルは，`潜在変数`を仮定してモデルを推定する．これには，現象の解釈がしやすいというメリットがある．売上の水準成分たる$\mu_t$と外部要因の影響つまり時変係数である$\beta_t$と，要因を分解してその変化を調べることができる．
+
+売上の水準は不規則に動いているが，宣伝の効果は徐々に右肩下がりになっている．宣伝のやり方を変えるべき．
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

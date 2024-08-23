@@ -1,0 +1,357 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "2章 ローカルレベルモデル"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes,
+               ggfortify,
+               gridExtra)
+source("func/plotSSM.R")
+
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+
+# ホワイトノイズとi.i.d系列
+
+- ホワイトノイズ:期待値が0であり，分散が一定であり，同時刻以外の自己相関が0であるという特徴がある．
+
+t時点のホワイトノイズを$\epsilon_t$とすると以下のようになる
+
+$$
+\begin{aligned}
+&\text{E}(\epsilon_t)=0\\
+&\text{Cov}(\epsilon_t,\epsilon_{t-k})= \left\{
+\begin{array}{ll}
+\sigma^2&,k = 0\\
+0&,k \ne 0
+\end{array}
+\right.
+\end{aligned}
+$$
+$\epsilon_{t-k}$はk時点だけずれたホワイトノイズである．
+
+ホワイトノイズは`正規ホワイトノイズ`が仮定されることがしばしばある．正規分布に絞ることで分析が容易になる．正規ホワイトノイズはi.i.d系列であることが知られている．
+$$
+\epsilon_t \sim \text{Normal}(0, \sigma^2)
+$$
+
+時系列データは時間の前後関係をモデルで表現する．前後関係で表現できなかった`残り`としてホワイトノイズが仮定される．正規ホワイトノイズは$k \ne 0$ならば自己相関が0なので，「過去から未来を予測する情報をほとんど含んでいない」系列とみなせる．
+
+# 正規ホワイトノイズを用いた，とても単純な時系列モデルの例
+
+時点tの観測値$y_t$を，以下のようにモデル化する
+$$
+y_t = \mu + \epsilon_t,\ \ \ \ \epsilon_t \sim \text{Normal}(0,\sigma^2)
+$$
+ある時系列は，$\mu$に正規ホワイトノイズが加わったものと考えている．
+
+別の表現として，下記のものがある
+$$
+y_t \sim \text{Normal}(\mu, \sigma^2)
+$$
+時系列データ$y_t$は，平均が$\mu$，分散が$\sigma^2$の正規分布に従って得られると考えてモデルである．
+
+正規ホワイトノイズを使うことで，時系列データがある一定の平均値$\mu$の周りをばらつく様子を表現できた．
+
+# ランダムウォーク
+
+`ランダムウォーク`とは，i.i.d系列の累積和からなる系列のことです．
+
+ランダムウォーク系列$y_t$は以下のように表記されます
+$$
+y_t = t_{t-1} + \epsilon_t,\ \ \ \epsilon_t \sim \text{Normal}(0,\sigma^2)
+$$
+時点0のデータ$y_0$を0とすると，$y_t$は以下のように変化していく
+
+|時点|$y_t$|
+|--|--|
+|0時点|0|
+|1時点目|$\epsilon_1$|
+|2時点目|$\epsilon_1+\epsilon_2$|
+|3時点目|$\epsilon_1+\epsilon_2+\epsilon_3$|
+|t時点目|$\sum_{i=1}^{t}\epsilon_i$|
+
+上記の式は以下のように表現できる
+
+$$
+y_t \sim \text{Normal}(y_{t-1},\sigma^2)
+$$
+ランダムウォークは単純な構造ではあるが，正規分布のパラメータが時間位によって変化する構造を表現できる．
+
+
+時系列データ$y_t$がランダムウォーク系列であり，$y_0 = 0$であったとしよう．
+
+1時点目では$y_1 = \epsilon_1$となる．ここで，たまたま$\epsilon_1 = 0.8$だったとする．$y_1 = 0.8$である．すると，2時点目の$y_2$は「平均値が0.8である正規分布」に従って得られる．2時点目ですでに期待値が0でない．正規ホワイトノイズを仮定したモデルとは全く異なる．
+
+データ生成過程の構造として，ランダムウォーク系列はやや単純すぎるが，1つの候補にはなる．
+
+# Rで確認するホワイトノイズとランダムウォーク
+
+シミュレーションを通して確認する
+```{r}
+#正規ホワイトノイズ
+set.seed(1)
+wn <- rnorm(n = 100, mean = 0, sd =1)
+```
+
+cumsum関数を使ってホワイトノイズの累積和を計算し，ランダムウォーク系列を得る．
+```{r}
+#ランダムウォーク
+rw <- cumsum(wn)
+```
+正規ホワイトノイズとランダムウォーク系列をまとめて図示する
+```{r}
+#グラフを作る
+p_wn_1 <- autoplot(ts(wn),main = "ホワイトノイズ")
+p_rw_1 <- autoplot(ts(rw),main = "ランダムウォーク")
+
+grid.arrange(p_wn_1,p_rw_1)
+```
+ランダムウォーク系列は右肩上がりになったが，0周辺のこともあれば，右肩下がりになることもある．
+
+試行回数を20にしてみる
+```{r}
+#複数のホワイトノイズ．ランダムウォーク系列
+wn_mat <- matrix(nrow = 100, ncol = 20)
+rw_mat <- matrix(nrow = 100, ncol = 20)
+
+set.seed(1)
+for(i in 1:20){
+  wn <- rnorm(n = 100, mean = 0, sd = 1)
+  wn_mat[,i] <- wn
+  rw_mat[,i] <- cumsum(wn)
+}
+
+#グラフを作る
+p_wn_2 <- autoplot(ts(wn_mat),facets = F, main = "ホワイトノイズ")+
+  theme(legend.position = 'none')
+
+p_rw_2 <- autoplot(ts(rw_mat),facets = F, main = "ランダムウォーク")+
+  theme(legend.position = 'none')
+
+#2つのグラフをまとめる
+grid.arrange(p_wn_2,p_rw_2
+             )
+
+```
+
+# ローカルレベルモデルの構造
+
+`ローカルレベルモデル`は以下のように表現される
+$$
+\begin{aligned}
+&\mu_t = \mu_{t-1} + w_t, \ \ \ w_t \sim \text{Normal}(0,\sigma^2_{w})\\
+&y_t = \mu_{t} + v_t, \ \ \ v_t \sim \text{Normal}(0,\sigma^2_{v})
+\end{aligned}
+$$
+
+$w_t$を`過程誤差`，$v_t$を`観測誤差`と呼ぶ．
+正規ホワイトノイズに従う過程誤差が積み重なって状態が変化している．なので，状態はランダムウォークしていると考えられる．その状態に観測誤差が加わって観測値が得られる．過程誤差は，「状態の変化の大きさ」を表すものと理解する．$\sigma^2_w$は状態の変化を表すパラメータである．
+
+上記の式は次のように表現できる
+$$
+\begin{aligned}
+\mu_t &\sim \text{Normal}(\mu_{t-1},\sigma^2_w)\\
+y_t &\sim \text{Normal}(\mu_{t},\sigma^2_v)
+\end{aligned}
+$$
+
+状態を表す式で得られた確率変数の実現値が，観測値$y_t$における確率分布の母数になっているので，これは階層ベイズモデルの枠組みで扱われる．
+
+ところで$y_t = \mu + \epsilon_t,\epsilon_t \sim \text{Normal}(0,\sigma^2)$は，説明変数がなく，正規分布を仮定した一般化線形モデルとみなせる．ローカルレベルモデルは固定化された切片$\mu$の代わりに，動的に変化する$\mu_t$を想定する．なので，ローカルレベルモデルは「説明変数がなく，切片がランダムウォークしている，正規分布を仮定したモデル」と表現できそうである．なお，$\mu$は`水準成分`あるいは`レベル成分`とも呼ばれる．
+
+切片だけでなく，説明変数を追加した上でその係数がランダムウォークするモデルを想定することもある．
+
+# ローカルレベルのためのStanファイルの実装
+
+stanファイルをコンパイルしよう!
+
+```{r}
+model_1 <- cmdstan_model("stan/5_2_1.stan")
+
+model_1$print()
+```
+
+# データの読み込みとPOSIXctへの変換
+
+2010/1/1から100日間にわたって取得された架空の売上データを読み込みます
+
+```{r}
+#データの読み込み
+sales_df <- read.csv("data/5-2-1-sales-ts-1.csv")
+
+#日付をpisixctに変換する
+sales_df$date <- as.POSIXct(sales_df$date)
+
+#確認
+head(sales_df, n = 3)
+
+```
+
+# MCMCの実行
+
+データをリスト形式にする
+
+```{r}
+#データの構造
+data_list <- list(
+  y = sales_df$sales,
+  T = nrow(sales_df)
+)
+
+#モデルの推定
+local_level_stan <- model_1$sample(
+  data = data_list,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+
+```{r}
+local_level_stan$summary(c("s_w","s_v"))
+```
+
+過程誤差よりも観測誤差の方が大きいようである．
+
+以下のコマンドで$\hat{R}$を確認する
+```{r}
+all(local_level_stan$summary()[,"rhat"] < 1.1, na.rm = TRUE)
+```
+
+収束に問題はなかったようである．念のために可視化しておく
+```{r}
+combo <- mcmc_combo(local_level_stan$draws(c("s_w","s_v")))
+area <- mcmc_areas(local_level_stan$draws(c("s_w","s_v")) )
+plot(combo)
+plot(area)
+```
+
+
+# 推定された状態の図示
+
+mcmcサンプルを集計した上で，それを図示したい．
+```{r}
+#生成された乱数を格納
+drws <- local_level_stan$draws("mu")
+
+result <- data.frame(t(apply(
+  X = drws,
+  MARGIN = 3,
+  FUN = quantile, 
+  probs = c(0.025, 0.5,0.975))))
+
+#列名の変更
+colnames(result) <- c("lwr", "fit", "upr")
+
+#時間軸の変更
+result$time <- sales_df$date
+
+#観測値の追加
+result$obs <- sales_df$sales
+```
+
+データの整形が終わったので，図示をする
+```{r}
+ggplot(data = result,
+       aes(x = time,
+           y = obs))+
+  labs(title = "ローカルレベルモデルの推定結果")+
+  geom_point(alpha = 0.6, size = 0.9)+
+  geom_line(aes(y = fit), size = 1.2)+
+  geom_ribbon(aes(ymin = lwr,ymax = upr),alpha = 0.3)+
+  scale_x_datetime(date_labels = "%Y年%m月")
+```
+
+
+
+
+
+
+
+
+
+
+# test
+
+
+
+
+
+
+
+```{r}
+plotSSM(sample = drws,
+        time_vec = sales_df$date,
+        obs_vec = sales_df$sales,
+        graph_title = "ローカルレベルモデルの推定結果",
+        y_label = "sales")
+```
+
+
+
+
+

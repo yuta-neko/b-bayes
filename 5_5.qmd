@@ -1,0 +1,401 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "5章 トレンドの構造"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes,
+               ggfortify,
+               gridExtra)
+source("func/plotSSM.R")
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+# 確定的トレンド
+
+- トレンド:長期的な変動傾向のこと
+
+- 確定的トレンド:単位時間ごとに一定の定まった変化をすること
+
+例えば，$y_t$が確定的トレンドを持っている
+$$
+y_t - y_{t-1} = \delta
+$$
+この場合，売上の期待値は毎日$\delta$ずつ伸びることがわかる．
+
+t時点の売上は
+$$
+\begin{aligned}
+y_t &= y_0 + \sum_{i = 1}^{t} \delta\\
+&= y_0 + t \cdot\delta
+\end{aligned}
+$$
+
+確定的トレンドの大きさ$\delta$は，切片を$y_0$，説明変数に経過日数tをとった単回帰でok
+$$
+y_t = y_0 + t \cdot \delta + \nu_t \ \ \ \ \nu_t \sim \text{Normal}(0,\sigma^2_\nu)
+$$
+
+逆に，説明変数にtがあったら，それは確定的トレンドという強い仮定を置いている．ここは注意！
+
+# 確定的トレンドとランダムウォーク
+
+ランダムウォークは正規ホワイトノイズなどのi.i.d系列の累積和として表現できる．
+
+$\omega_t$を正規ホワイトノイズに従う系列とする．
+
+ランダムウォーク系列$\mu_t$は? --> $\omega_t$の累積和
+
+$$
+\mu_t - \mu_{t-1} = \omega_t,\ \ \ \ \omega_t \sim \text{Normal}(0, \sigma^2_\omega)
+$$
+初期値$\mu_0$とすると，時点tでの売上は以下のように計算される
+$$
+\mu_t = \mu_0 + \sum_{i = 1}^{t} \omega_t
+$$
+確定的トレンドの場合は固定値$\delta$が足し合せれていたのが，正規ホワイトノイズ$\omega_t$に変わっただけ．確定的トレンドと対比する意味で，ランダムウォークのような構造を`確率的トレンド`と呼ぶ.
+
+上記の確率的トレンドに観測誤差が加わって観測値$y_t$が得られる考えたモデルは以下のようになる
+$$
+\begin{aligned}
+&\mu_t = \mu_{t-1} + \omega_t,&\omega_t \sim \text{Normal}(0, \sigma^2_\omega)\\
+&y_t = \mu_t + \nu_t, &\nu_t \sim \text{Normal}(0, \sigma^2_\nu)
+\end{aligned}
+$$
+これはローカルレベルモデルに他ならない
+
+# 平滑化トレンドモデルの構造
+
+ローカルレベルモデルでは，1時点前の状態との差分値，即ち$\mu_t - \mu_{t-1}$が，正規ホワイトノイズ$\omega_t$に従うことを想定していた．この方法ではトレンドの値が毎回変わってしまう．以下のように修正した`平滑化トレンドモデル`を想定した方が良い.
+$$
+(\mu_t - \mu_{t-1}) - (\mu_{t-1}-\mu_{t-2})  = \zeta_t,\ \ \ \zeta_t \sim \text{Normal}(0, \sigma^2_\zeta)
+$$
+平滑化トレンドモデルは「差分の差分」正規ホワイトノイズに従うことを想定する．
+
+以下のように表現し直す
+$$
+(\mu_t - \mu_{t-1}) = (\mu_{t-1}-\mu_{t-2}) + \zeta_t ,\ \ \ \zeta_t \sim \text{Normal}(0, \sigma^2_\zeta)
+$$
+前回の増減量にホワイトノイズが加わったものが次回の増減量であることがわかる．ホワイトノイズの期待値は0であるので，前回と次回の増減量はよく似たものになるのがわかる．
+
+- 平滑化トレンドの状態方程式
+
+$$
+\mu_t = 2\mu_{t-1}-\mu_{t-2} + \zeta_t ,\ \ \ \zeta_t \sim \text{Normal}(0, \sigma^2_\zeta)
+$$
+stanでは以下のように書き換えるとよし
+
+$$
+\mu_t \sim \text{Normal}(2\mu_{t-1}-\mu_{t-2} , \sigma^2_\zeta)
+$$
+
+- 観測方程式
+
+ローカルレベルモデルと変化なし
+
+
+$$
+\begin{aligned}
+y_t &= \mu_{t} + v_t, \ \ \ v_t \sim \text{Normal}(0,\sigma^2_{v})\\
+y_t &\sim \text{Normal}(\mu_t,\sigma^2_v)
+\end{aligned}
+$$
+
+# 平滑化トレンドモデルの別表現
+
+一階差分の大きさを$\delta_t$とする．
+
+$$
+\begin{aligned}
+\delta_t &= \delta_{t-1} + \zeta_t, \ \ \ \zeta_t \sim \text{Normal}(0,\sigma^2_{v})\\
+\mu_t &= \mu_{t-1} + \delta_{t-1} 
+\end{aligned}
+$$
+
+一階差分が$\delta$になり，さらにその$\delta$の一階差分差分が正規ホワイトノイズに従う．これで二階差分を表現できた．
+
+この形式にすることで，単位時間あたりの変化量$\delta_t$を外に出せるので解釈が容易になる．また，方程式を増やすことでことで三階差分モデル，四階差分モデルと発展させることができる．これらをまとめて`トレンド成分モデル`と呼ぶ．N階差分のモデルはN次のトレンド成分モデルと呼ばれる．トレンド成分モデルに観測誤差が加わって観測値が得られると考える状態空間モデルは，N次の`トレンドモデル`と呼ばれます．
+
+# ローカル線形トレンドモデルの構造
+
+$\mu_t$を水準成分,$\delta_t$をドリフト成分と呼ぶ．
+
+平滑化トレンドモデルでは，ドリフト成分$\delta_t$はランダムウォークに従って変化するが，水準成分$\mu_t$には観測誤差が含まれていない．そこで，水準成分$\mu_t$に観測誤差を加えることを考える．このモデルを`ローカル線形トレンドモデル`と呼びます．
+
+$$
+\begin{aligned}
+\delta_t &= \delta_{t-1} + \zeta_t,&\zeta \sim \text{Normal}(0,\sigma^2_\zeta)\\
+\mu_t &= \mu_{t-1} + \delta_{t-1} + \omega_t,&\omega_t \sim \text{Normal}(0, \sigma^2_\omega)
+\end{aligned}
+$$
+
+このモデルの特殊バージョンとして，水準の過程誤差が0であることを想定しているモデルを特に`平滑化トレンドモデル`と読んでいる．
+
+ローカル線形トレンドモデルの方が優れているわけではなく，モデルを推定するとしばしば過程誤差の大きさ$\sigma^2_\omega$などが0に近い値として想定されることがある．この場合は平滑化トレンドモデルと変わらない．平滑化トレンドモデルの方が推定するべきパラメータの値が1つ減っているので，推定が容易になる．
+
+# データの読み込み
+
+```{r}
+sales_df_3 <- read.csv("data/5-5-1-sales-ts-3.csv")
+
+sales_df_3$date <- as.POSIXct(sales_df_3$date)
+
+head(sales_df_3, n = 3)
+```
+
+売上の図示
+```{r}
+#| fig-cap: "トレンドが変化する売上の時系列プロット"
+autoplot(ts(sales_df_3[, -1]))
+```
+
+
+
+
+
+# mcmcの実行
+
+ローカルレベルモデルを適用する．ローカルレベルモデルは1次のトレンドモデルと言える．
+```{r}
+#データの準備
+data_list <- list(
+  y = sales_df_3$sales,
+  T = nrow(sales_df_3)
+)
+
+
+#ローカルレベルモデルの推定
+local_level <- cmdstan_model("stan/5_2_1.stan")
+print(local_level)
+
+fit_1 <- local_level$sample(
+  data = data_list,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+
+#結果の表示
+fit_1$summary()
+```
+
+
+
+過程誤差s_wと観測誤差s_vの大きさ絵を見てみる
+```{r}
+print(fit_1,
+      c("s_w","s_v"))
+```
+
+# 平滑化トレンドモデルのためのstanファイルの実装
+
+
+```{r}
+model_2 <- cmdstan_model("stan/5_5_1.stan")
+
+model_2$print()
+```
+
+
+状態方程式を変更したこと以外，何も変わってない
+
+# mcmcの実行
+
+```{r}
+#実行
+fit_2 <- model_2$sample(
+  data = data_list,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+
+#結果の表示
+fit_2$summary(c("s_z","s_v"))
+```
+
+ドリフト成分の変化の大きさは，ローカルモデルの過程誤差に比べて小さい．図示するとわかりやすい．
+
+# ローカル線形トレンドモデルのためのstanファイルの実装
+
+```{r}
+model_3 <- cmdstan_model("stan/5_5_2.stan")
+
+model_3$print()
+```
+
+
+収束をよくするために狭い範囲の弱事前分布を指定している．本当は感度分析をした方が良い．
+
+ローカルレベルモデルに「時間によって変化するドリフト成分$\delta$を追加しただけ.
+
+# mcmcの実行(ローカル線形トレンドモデル)
+
+```{r}
+#実行
+fit_3 <- model_3$sample(
+  data = data_list,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+
+fit_3$summary(c("s_w","s_z","s_v"))
+```
+
+
+
+# 推定された状態の図示
+
+
+```{r}
+#| fig-cap: "3種類のモデルの状態推定値の比較"
+#| fig-width: 7
+#| fig-height: 16
+
+#まずはmcmcサンプルの取得
+sample_ll <- fit_1$draws("mu")
+sample_st <- fit_2$draws("mu")
+sample_llt <- fit_3$draws("mu")
+
+#結果の図示
+
+#ローカルレベルモデル
+p_ll <- plotSSM(sample = sample_ll,
+                time_vec = sales_df_3$date,
+                obs_vec = sales_df_3$sales,
+                graph_title = "ローカルレベルモデル",
+                y_label = "sales")
+
+#平滑化トレンドモデル
+p_st <- plotSSM(sample = sample_st,
+                time_vec = sales_df_3$date,
+                obs_vec = sales_df_3$sales,
+                graph_title = "平滑化トレンドモデル",
+                y_label = "sales")
+
+#ローカル線形モデル
+p_llt <- plotSSM(sample = sample_llt,
+                time_vec = sales_df_3$date,
+                obs_vec = sales_df_3$sales,
+                graph_title = "ローカル線形トレンドモデル",
+                y_label = "sales")
+
+grid.arrange(p_ll,p_st,p_llt)
+```
+
+
+
+
+ローカルレベルモデルの過程誤差よりも，平滑化トレンドモデルのようが過程誤差が小さかった．状態の変化が小さいということである．ローカル線形トレンドモデルは上と真ん中の中間．
+
+
+# ドリフト成分の図示
+
+```{r}
+#| fig-cap: "ドリフト成分の図示"
+#| fig-width: 7
+#| fig-height: 5
+
+
+#乱数の抽出
+sample_del <- fit_3$draws("delta")
+
+#結果の図示
+plotSSM(sample = sample_del,
+                time_vec = sales_df_3$date,
+                graph_title = "ドリフト成分",
+                y_label = "delte")
+```
+
+徐々に売上の増加量が下がり，最後は減少に転じた
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

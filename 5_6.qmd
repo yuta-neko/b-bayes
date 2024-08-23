@@ -1,0 +1,285 @@
+---
+title: "応用編 状態空間モデル"
+subtitle: "6章 周期性のモデル化"
+author: "宇畑 優太（1260404）"
+date: today
+execute: 
+  echo: true
+  warning: false
+  message: true
+format: 
+  pdf:
+    fig-width: 5
+    fig-height: 3
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    include-in-header:
+      - text: \setlength{\parindent}{1em}
+pdf-engine: lualatex
+documentclass: ltjsarticle 
+lang: ja
+---
+
+# 準備 {-}
+```{r global_option}
+## PDF に出力する際は cairo を使用する
+if (knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dev = "cairo_pdf")
+}
+
+#パッケージの読み込み
+pacman::p_load(tidyverse, 
+               broom, 
+               coefplot, 
+               texreg,
+               bayesplot,
+               rstan,
+               rstanrm,
+               parallel,
+               posterior,
+               cmdstanr,
+               patchwork,
+               ggplot2,
+               tidybayes,
+               ggfortify,
+               gridExtra)
+source("func/plotSSM.R")
+#日本語の設定
+if (.Platform$OS.type == "windows") { 
+  if (require(fontregisterer)) {
+    my_font <- "Yu Gothic"
+  } else {
+    my_font <- "Japan1"
+  }
+} else if (capabilities("aqua")) {
+  my_font <- "HiraginoSans-W3"
+} else {
+  my_font <- "IPAexGothic"
+}
+
+theme_set(theme_gray(base_size = 9,
+                     base_family = my_font))
+```
+
+
+```{r}
+#計算の高速化
+rstan_options(auto_write = TRUE) 
+options(mc.cores = parallel::detectCores())
+```
+
+
+# 季節性と周期性
+
+気温データなんかを**季節性**という．アイスの売上なんかもそうである．
+
+電力量は夜に増加する，おもちゃの売上は休日に増えるみたいなやつを**周期性**という．
+
+# 確定的周期性分の構造
+
+トレンドも周期性もないなら，構造のモデル化は簡単である．
+
+$$
+\mu = 100
+$$
+で終わりである．
+
+売上のデータが四半期ごとに得られるとする．
+
+- 1Q : 110万円
+
+- 2Q : 150万円
+
+- 3Q : 80万円
+
+- 4Q : 140万円
+
+4つの周期成分を$\gamma_1,\gamma_2,\gamma_3,\gamma_4$とする．
+
+- パターン1
+
+|水準成分:$\mu$|周期成分1$\gamma_1$|周期成分2$\gamma_2$|周期成分3$\gamma_3$|周期成分4$\gamma_4$|
+|---|---|---|---|---|
+|100|10|50|-20|40|
+
+
+しかし，水準成分を120を変えると以下のような周期成分も想定できる
+
+- パターン2
+
+|水準成分:$\mu$|周期成分1$\gamma_1$|周期成分2$\gamma_2$|周期成分3$\gamma_3$|周期成分4$\gamma_4$|
+|---|---|---|---|---|
+|120|-10|30|-40|20|
+
+
+水準成分がいくらであってもデータを再現できる．「周期成分の合計値が0」というルールを置くことで水準成分の値と周期成分の値を一意に定めることができる．
+
+そのルールは以下のように表現できる
+
+$$
+\begin{aligned}
+\gamma_1 + \gamma_2 + \gamma_3 + \gamma_4 &= \sum_{i = 1}^{4}\gamma_i = 0\\
+\gamma_4& = -\sum_{i = 1}^{3}\gamma_i\\
+\gamma_k& = -\sum_{i = 1}^{k-1}\gamma_i
+\end{aligned}
+$$
+
+
+# 確率的周期成分の構造
+
+次は，周期成分が確率的に変化することを想定する．この場合，「周期成分の合計値が正規ホワイトノイズ$s_t$に従う」と考える．こうすることで，周期成分が時点ごとに僅かに変化する様子を表現できる．
+
+$$
+\begin{aligned}
+& \sum_{i = 1}^{k}\gamma_i = s_t,& s_t \sim \text{Normal}(0, \sigma^2_s)\\
+& \gamma_i = - \sum_{i = t - (k-1)}^{t-1}\gamma_i + s_t, &s_t \sim \text{Normal}(0, \sigma^2_s)\\
+&\gamma_t \sim \text{Normal} \left( -\sum_{i = t - (k-1)}^{t-1}\gamma_i , \sigma^2_s \right)
+\end{aligned}
+$$
+
+# 基本構造時系列モデルの構造
+
+観測値が「トレンド成分＋周期成分＋ホワイトノイズ」で表現されるモデルは`基本構造時系列モデル`と呼ぶ．トレンド成分モデルとしては，ローカルレベルモデルや平滑化トレンドモデルなどと同様のモデルが使える．
+
+- 1次のトレンド(ローカルレベルモデル)
+
+$$
+\begin{aligned}
+& \mu_t \sim \text{Normal}(\mu_{t-1},\sigma^2_w)\\
+& \gamma_t \sim \text{Normal} \left(- \sum_{i = t - (k-1)}^{t-1}  \gamma_i, \sigma^2_s \right) \\
+& \alpha_t = \mu_t + \gamma_t\\
+& y_t \sim \text{Normal}(\alpha_t, \sigma^2_v)
+\end{aligned}
+$$
+
+- 2次のトレンド(平滑化トレンドモデル)
+
+$$
+\begin{aligned}
+& \mu_t \sim \text{Normal}(2\mu_{t-1} - \mu_{t-2},\sigma^2_\zeta)\\
+& \gamma_t \sim \text{Normal} \left(- \sum_{i = t - (k-1)}^{t-1}  \gamma_i, \sigma^2_s \right) \\
+& \alpha_t = \mu_t + \gamma_t\\
+& y_t \sim \text{Normal}(\alpha_t, \sigma^2_v)
+\end{aligned}
+$$
+
+# データの読み込み
+
+```{r}
+#読み込みと変換
+sales <- read.csv("data/5-6-1-sales-ts-4.csv")
+sales$date <- as.POSIXct(sales$date)
+head(sales)
+```
+
+```{r}
+#| fig-cap: "売上の時系列プロット"
+#| fig-width: 10
+#| fig-height: 7
+
+
+#図示
+autoplot(ts(sales[, -1]))
+```
+
+
+
+
+増加トレンドが徐々に減少していくこと，7日周期での周期性が見られる．
+
+
+
+# 基本構造時系列モデルのためのstanファイルの実装
+
+```{r}
+#コンパイル
+model_1 <- cmdstan_model("stan/5_6_1.stan")
+
+model_1$print()
+```
+
+# mcmcの実行
+
+```{r}
+#データの準備
+data_list <- list(
+  y = sales$sales,
+  T = nrow(sales)
+)
+
+#基本構造時系列モデルの推定
+basic_str <-  model_1$sample(
+  data = data_list,
+  seed = 1,
+  chains = 4,
+  refresh = 1000,
+  iter_warmup = 1000,
+  iter_sampling = 1000
+)
+```
+
+
+推定結果は以下の通り
+```{r}
+#s推定結果
+basic_str$summary(c("s_z", "s_s", "s_v"))
+```
+
+
+# 推定された結果の図示
+
+```{r}
+#| fig-cap: "基本構造時系列モデルの推定結果"
+#| fig-width: 10
+#| fig-height: 12
+
+
+#mcmcサンプルの取得
+sample_alpha <- basic_str$draws("alpha")
+sample_mu <-  basic_str$draws("mu")
+sample_gamma <- basic_str$draws("gamma")
+
+#全ての成分を含んだ状態推定値の図示
+p_all <- plotSSM(sample = sample_alpha,
+                 time_vec = sales$date,
+                 obs_vec = sales$sales,
+                 graph_title = "全ての成分を含んだ状態推定値",
+                 y_label = "sales")
+
+#周期成分を除いた状態推定値の図示
+p_trend <- plotSSM(sample = sample_mu,
+                   time_vec = sales$date,
+                   obs_vec = sales$sales,
+                   graph_title = "周期成分を除いた状態推定値",
+                   y_label = "sales")
+
+#周期成分の図示
+p_cycle <- plotSSM(sample = sample_gamma,
+                   time_vec = sales$date,
+                   graph_title = "周期成分",
+                   y_label = "gamma")
+
+grid.arrange(p_all,p_trend,p_cycle)
+```
+
+
+
+
+
+状態空間モデルを用いることで，時系列データを分解できる．ドリフト成分も周期成分も時間によって変化することを認めている．柔軟さと解釈可能性を兼ね備えた成分モデルである．
+
+余計な要因を除き，純粋なトレンドや水準を抽出することを`季節調整`という．
+
+
+
+
+
+
+
+
+
+
+
+
+
